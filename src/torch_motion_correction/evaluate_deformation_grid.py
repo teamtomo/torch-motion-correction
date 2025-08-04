@@ -1,6 +1,5 @@
 import torch
-import numpy as np
-from typing import Tuple, Union, Sequence
+from typing import Tuple
 from torch_cubic_spline_grids import CubicCatmullRomGrid3d
 
 
@@ -12,37 +11,6 @@ def evaluate_deformation_grid(
     deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_grid).to(deformation_grid.device)
     predicted_shifts = deformation_field(tyx)
     return predicted_shifts
-
-
-def evaluate_deformation_grid_batched(
-    deformation_grid: torch.Tensor,  # (nt, nh, nw)
-    tyx: torch.Tensor,  # (..., 3)
-    batch_size: int = 50000,
-) -> torch.Tensor:
-    """Memory-efficient evaluation by processing coordinates in batches."""
-    deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_grid).to(deformation_grid.device)
-    
-    # Store original shape and flatten coordinates
-    original_shape = tyx.shape
-    tyx_flat = tyx.reshape(-1, 3)
-    n_coords = tyx_flat.shape[0]
-    
-    # Process coordinates in batches
-    batch_results = []
-    for start_idx in range(0, n_coords, batch_size):
-        end_idx = min(start_idx + batch_size, n_coords)
-        batch_coords = tyx_flat[start_idx:end_idx]
-        batch_shifts = deformation_field(batch_coords)
-        batch_results.append(batch_shifts)
-        
-        # Clear cache between batches to prevent fragmentation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    
-    # Combine results and restore original shape
-    all_shifts = torch.cat(batch_results, dim=0)
-    return all_shifts.reshape(original_shape[:-1] + (2,))
-
 
 class LazyDeformationGridEvaluator:
     """
