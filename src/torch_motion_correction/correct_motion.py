@@ -7,30 +7,41 @@ from torch_motion_correction.evaluate_deformation_grid import evaluate_deformati
 
 
 def correct_motion(
-    image: torch.Tensor,  # (t, h, w)
+    image: torch.Tensor,
     pixel_spacing: float,
     deformation_grid: torch.Tensor,
+    grad: bool = False,
 ) -> torch.Tensor:
-    # grab image dims
     t, h, w = image.shape
-
-    # construct output tensor and per-frame normalized time values
-    corrected_image = torch.zeros(size=(h, w), dtype=torch.float32, device=image.device)
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
-
-    # correct motion in each frame
-    corrected_frames = [
-        _correct_frame(
-            frame=frame,
-            pixel_spacing=pixel_spacing,
-            deformation_grid=deformation_grid,
-            t=frame_t
-        )
-        for frame, frame_t
-        in zip(image, normalized_t)
-    ]
-    corrected_frames = torch.stack(corrected_frames, dim=0).detach()
-    return corrected_frames # (t, h, w)
+    
+    # Use conditional gradient context to save memory
+    gradient_context = torch.enable_grad() if grad else torch.no_grad()
+    
+    with gradient_context:
+        for i, frame_t in enumerate(normalized_t):
+            print(f"Processing frame {i+1}/{t}")
+            # Extract frame (creates a view, not a copy)
+            frame = image[i]
+            
+            # Create a temporary copy for sampling
+            frame_copy = frame.clone()
+            
+            # Process directly into the original location
+            image[i] = _correct_frame(
+                    frame=frame_copy,
+                    pixel_spacing=pixel_spacing, 
+                    deformation_grid=deformation_grid,
+                    t=frame_t
+                )
+            
+            # Explicitly delete the copy
+            del frame_copy
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
+    return image
 
 
 def _correct_frame(
