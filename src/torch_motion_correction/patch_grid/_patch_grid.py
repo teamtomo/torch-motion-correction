@@ -484,6 +484,117 @@ class LazyPatchGrid:
         """Get patch centers for a subset of the grid."""
         return self.patch_centers[indices]
     
+    def get_patches_at_indices(self, idx_gh: torch.Tensor, idx_gw: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get patches at specific grid indices to match non-lazy behavior.
+        
+        Parameters
+        ----------
+        idx_gh: torch.Tensor
+            Grid indices in height dimension
+        idx_gw: torch.Tensor 
+            Grid indices in width dimension
+            
+        Returns
+        -------
+        patches: torch.Tensor
+            Patches at the specified indices
+        centers: torch.Tensor
+            Corresponding patch centers
+        """
+        if self.ndim == 2:
+            # Extract patches using the same logic as non-lazy version
+            patches_list = []
+            centers_list = []
+            
+            ph, pw = self.patch_shape
+            
+            for i in range(len(idx_gh)):
+                gi, gj = idx_gh[i].item(), idx_gw[i].item()
+                center_h, center_w = self.patch_centers[gi, gj]
+                
+                # Calculate patch boundaries (same logic as random_subset)
+                h_start = max(0, int(center_h - ph // 2))
+                h_end = min(self.images.shape[-2], h_start + ph)
+                h_start = max(0, h_end - ph)
+                
+                w_start = max(0, int(center_w - pw // 2))  
+                w_end = min(self.images.shape[-1], w_start + pw)
+                w_start = max(0, w_end - pw)
+                
+                # Extract patch using slicing
+                patch = self.images[..., h_start:h_end, w_start:w_end]
+                
+                # Add singleton dimension to match expected shape (t, 1, ph, pw)
+                patch = patch.unsqueeze(-3)
+                
+                patches_list.append(patch)
+                centers_list.append(self.patch_centers[gi, gj])
+            
+            # Stack patches and centers
+            patches = torch.stack(patches_list, dim=-4)  # (t, n_patches, 1, ph, pw)
+            centers = torch.stack(centers_list, dim=0)   # (n_patches, 2)
+            
+        else:  # ndim == 3
+            # For 3D case - similar logic but with depth dimension
+            patches_list = []
+            centers_list = []
+            
+            pd, ph, pw = self.patch_shape
+            
+            for i in range(len(idx_gh)):
+                # For 3D case, we need to handle the depth index too
+                # But for now, assuming we're using the 2D grid approach for time series
+                gi, gj = idx_gh[i].item(), idx_gw[i].item()
+                # Use first depth index (0) for time series case
+                gk = 0 if len(self.grid_shape) == 3 else None
+                
+                if gk is not None:
+                    center_d, center_h, center_w = self.patch_centers[gk, gi, gj]
+                else:
+                    center_h, center_w = self.patch_centers[gi, gj]
+                    center_d = 0
+                
+                # Same logic as random_subset for 3D
+                if pd == 1:
+                    # Time series case
+                    h_start = max(0, int(center_h - ph // 2))
+                    h_end = min(self.images.shape[-2], h_start + ph)
+                    h_start = max(0, h_end - ph)
+                    
+                    w_start = max(0, int(center_w - pw // 2))
+                    w_end = min(self.images.shape[-1], w_start + pw)
+                    w_start = max(0, w_end - pw)
+                    
+                    patch = self.images[..., h_start:h_end, w_start:w_end]
+                    patch = patch.unsqueeze(-3)  # Add singleton dimension
+                else:
+                    # True 3D case
+                    d_start = max(0, int(center_d - pd // 2))
+                    d_end = min(self.images.shape[-3], d_start + pd)
+                    d_start = max(0, d_end - pd)
+                    
+                    h_start = max(0, int(center_h - ph // 2))
+                    h_end = min(self.images.shape[-2], h_start + ph)
+                    h_start = max(0, h_end - ph)
+                    
+                    w_start = max(0, int(center_w - pw // 2))
+                    w_end = min(self.images.shape[-1], w_start + pw)
+                    w_start = max(0, w_end - pw)
+                    
+                    patch = self.images[..., d_start:d_end, h_start:h_end, w_start:w_end]
+                
+                patches_list.append(patch)
+                if gk is not None:
+                    centers_list.append(self.patch_centers[gk, gi, gj])
+                else:
+                    centers_list.append(self.patch_centers[gi, gj])
+            
+            patches = torch.stack(patches_list, dim=-4)  # Stack in patch dimension  
+            centers = torch.stack(centers_list, dim=0)
+        
+        return patches, centers
+    
     def clear_cache(self):
         """Clear the internal cache to free memory."""
         self._cache.clear()

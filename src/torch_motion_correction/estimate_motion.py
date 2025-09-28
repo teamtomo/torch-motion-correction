@@ -27,6 +27,7 @@ def estimate_motion(
     n_iterations: int = 200,
     n_patches_per_batch: int = 20,
     learning_rate: float = 0.05,
+    optimizer: str = 'adam',  # 'adam' or 'lbfgs'
     device: torch.device = None,  # device for the output tensor
 ) -> torch.Tensor:
     if device is None:
@@ -83,10 +84,19 @@ def estimate_motion(
     data_patch_positions = data_patch_positions / torch.tensor([t - 1, h - 1, w - 1], device=device)
 
     # initialise optimiser and detach data
-    motion_optimiser = torch.optim.Adam(
-        params=deformation_field.parameters(),
-        lr=learning_rate,
-    )
+    if optimizer.lower() == 'adam':
+        motion_optimiser = torch.optim.Adam(
+            params=deformation_field.parameters(),
+            lr=learning_rate,
+        )
+    elif optimizer.lower() == 'lbfgs':
+        motion_optimiser = torch.optim.LBFGS(
+            params=deformation_field.parameters(),
+            lr=learning_rate,
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer}. Choose 'adam' or 'lbfgs'.")
+    
     data_patches = data_patches.detach()
 
     # optimise shifts at grid points on deformation field
@@ -104,7 +114,7 @@ def estimate_motion(
         predicted_shifts = -1 * deformation_field(patch_subset_centers)
 
         # shift the patches by the predicted shifts
-        predicted_shifts_px = predicted_shifts / pixel_spacing
+        predicted_shifts_px = predicted_shifts
         shifted_patches = fourier_shift_dft_2d(
             dft=patch_subset,
             image_shape=(ph, pw),
@@ -123,17 +133,45 @@ def estimate_motion(
         )
         shifted_patches = shifted_patches * bandpass * b_factor_envelope
 
-        # calculate the loss, MSE between data patches and reference patches
-        loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
-
         # zero gradients, backpropagate loss and step optimiser
-        motion_optimiser.zero_grad()
-        loss.backward()
-        motion_optimiser.step()
+        if optimizer.lower() == 'adam':
+            # calculate the loss, MSE between data patches and reference patches
+            loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
+            motion_optimiser.zero_grad()
+            loss.backward()
+            motion_optimiser.step()
+        elif optimizer.lower() == 'lbfgs':
+            def closure():
+                motion_optimiser.zero_grad()
+                # Recompute forward pass in closure for L-BFGS
+                pred_shifts = -1 * deformation_field(patch_subset_centers)
+                pred_shifts_px = pred_shifts / pixel_spacing
+                shift_patches = fourier_shift_dft_2d(
+                    dft=patch_subset,
+                    image_shape=(ph, pw),
+                    shifts=pred_shifts_px,
+                    rfft=True,
+                    fftshifted=False,
+                )
+                shift_patches = shift_patches * bandpass * b_factor_envelope
+                # Use same stable reference in closure
+                reference_patches_closure = torch.mean(patch_subset, dim=0)
+                loss = torch.mean((shift_patches - reference_patches_closure).abs() ** 2)
+                loss.backward()
+                return loss
+            loss = motion_optimiser.step(closure)
+            # Extract loss value for logging
+            if isinstance(loss, torch.Tensor):
+                loss = loss.item()
+            else:
+                loss = float(loss) if loss is not None else 0.0
 
         # log loss
         if i % 10 == 0:
-            print(f"{i}: loss = {loss.item()}")
+            if isinstance(loss, torch.Tensor):
+                print(f"{i}: loss = {loss.item()}")
+            else:
+                print(f"{i}: loss = {loss}")
 
     # subtract mean from deformation field data
     average_shift = torch.mean(deformation_field.data)
@@ -150,6 +188,7 @@ def estimate_motion_lazy(
     n_iterations: int = 200,
     n_patches_per_batch: int = 20,
     learning_rate: float = 0.05,
+    optimizer: str = 'adam',  # 'adam' or 'lbfgs'
     device: torch.device = None,
 ) -> torch.Tensor:
     """Lazy motion estimation using on-demand patch extraction.
@@ -223,17 +262,30 @@ def estimate_motion_lazy(
         data_patch_positions = data_patch_positions / torch.tensor([t - 1, h - 1, w - 1], device=device)
 
     # Initialize optimizer
-    motion_optimiser = torch.optim.Adam(
-        params=deformation_field.parameters(),
-        lr=learning_rate,
-    )
+    if optimizer.lower() == 'adam':
+        motion_optimiser = torch.optim.Adam(
+            params=deformation_field.parameters(),
+            lr=learning_rate,
+        )
+    elif optimizer.lower() == 'lbfgs':
+        motion_optimiser = torch.optim.LBFGS(
+            params=deformation_field.parameters(),
+            lr=learning_rate,
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {optimizer}. Choose 'adam' or 'lbfgs'.")
 
     # Training loop using lazy patch extraction
     for i in range(n_iterations):
-        # Extract random patches on-demand - this is the key difference!
-        patch_subset, patch_positions = lazy_patch_grid.random_subset(n_patches_per_batch)
+        # Generate random patch indices to match non-lazy behavior
+        patch_subset_idx = np.random.randint(
+            low=(0, 0), high=(gh, gw), size=(n_patches_per_batch, 2)
+        )
+        idx_gh, idx_gw = einops.rearrange(patch_subset_idx, 'b idx -> idx b')
         
-        # Process patches same as memory-efficient version
+        # Extract patches at the selected indices
+        patch_subset, patch_positions = lazy_patch_grid.get_patches_at_indices(idx_gh, idx_gw)
+        
         # Reshape from (..., 1, ph, pw) to (..., ph, pw) 
         if len(patch_subset.shape) == 5:  # (t, n_patches, 1, ph, pw)
             patch_subset = einops.rearrange(patch_subset, 't n 1 ph pw -> t n ph pw')
@@ -244,14 +296,19 @@ def estimate_motion_lazy(
         patch_subset = patch_subset * mask
         patch_subset = torch.fft.rfftn(patch_subset, dim=(-2, -1))
         
-        # Create reference by averaging patches
-        reference_patches = torch.mean(patch_subset, dim=1, keepdim=True)  # Keep patch dimension for broadcasting
+        # Use the middle frame as the reference patch
+        middle_frame = patch_subset.shape[0] // 2
+        reference_patches = torch.mean(patch_subset, dim=0)
 
+        # Get patch centers for the selected patches (matching non-lazy version)
+        patch_subset_centers = data_patch_positions[:, idx_gh, idx_gw]
+        
         # Predict shifts at patch centers
-        predicted_shifts = -1 * deformation_field(patch_positions)
-
+        predicted_shifts = -1 * deformation_field(patch_subset_centers)
+        print(f"predicted_shifts shape: {predicted_shifts.shape}")
+        
         # Shift patches by predicted shifts
-        predicted_shifts_px = predicted_shifts / pixel_spacing
+        predicted_shifts_px = predicted_shifts
         shifted_patches = fourier_shift_dft_2d(
             dft=patch_subset,
             image_shape=(ph, pw),
@@ -270,21 +327,50 @@ def estimate_motion_lazy(
         )
         shifted_patches = shifted_patches * bandpass * b_factor_envelope
 
-        # Calculate loss
-        loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
-
         # Optimization step
-        motion_optimiser.zero_grad()
-        loss.backward()
-        motion_optimiser.step()
+        if optimizer.lower() == 'adam':
+            # Calculate loss
+            loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
+            motion_optimiser.zero_grad()
+            loss.backward()
+            motion_optimiser.step()
+        elif optimizer.lower() == 'lbfgs':
+            def closure():
+                motion_optimiser.zero_grad()
+                # Recompute forward pass in closure for L-BFGS
+                pred_shifts = -1 * deformation_field(patch_subset_centers)
+                pred_shifts_px = pred_shifts
+                shift_patches = fourier_shift_dft_2d(
+                    dft=patch_subset,
+                    image_shape=(ph, pw),
+                    shifts=pred_shifts_px,
+                    rfft=True,
+                    fftshifted=False,
+                )
+                shift_patches = shift_patches * bandpass * b_factor_envelope
+                # Use same stable reference in closure
+                reference_patches_closure = torch.mean(patch_subset, dim=0)
+                loss = torch.mean((shift_patches - reference_patches_closure).abs() ** 2)
+                loss.backward()
+                return loss
+            loss = motion_optimiser.step(closure)
+            # Extract loss value for logging
+            if isinstance(loss, torch.Tensor):
+                loss = loss.item()
+            else:
+                loss = float(loss) if loss is not None else 0.0
 
         # Progress logging
         if i % 10 == 0:
-            print(f"{i}: loss = {loss.item():.6f}")
+            if isinstance(loss, torch.Tensor):
+                print(f"{i}: loss = {loss.item():.6f}")
+            else:
+                print(f"{i}: loss = {loss:.6f}")
 
     # Return final deformation field
     average_shift = torch.mean(deformation_field.data)
-    final_deformation_field = deformation_field.data - average_shift
+    #final_deformation_field = deformation_field.data - average_shift
+    final_deformation_field = deformation_field.data
     return final_deformation_field
 
 
