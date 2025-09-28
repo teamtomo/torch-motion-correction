@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Sequence
+from torch_fourier_filter.bandpass import bandpass_filter
 
 import torch
 
@@ -58,3 +59,31 @@ def normalize_image(image: torch.Tensor):
     # normalize and return
     image = (image - mean) / std
     return image
+
+def prepare_bandpass_filter(
+    frequency_range: tuple[float, float],  # angstroms
+    patch_shape: tuple[int, int],
+    pixel_spacing: float,  # angstroms
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Prepare bandpass filter for cross-correlation (fixed, no refinement)."""
+    ph, pw = patch_shape
+    
+    # Use the higher resolution cutoff (smaller angstrom value)
+    cuton, cutoff = frequency_range
+    low_fftfreq = spatial_frequency_to_fftfreq(1 / cuton, spacing=pixel_spacing)
+    high_fftfreq = spatial_frequency_to_fftfreq(1 / cutoff, spacing=pixel_spacing)
+    
+    # Prepare bandpass
+    bandpass = bandpass_filter(
+        low=low_fftfreq,
+        high=high_fftfreq,
+        falloff=0,
+        image_shape=(ph, pw),
+        rfft=True,
+        fftshift=False,
+        device=device
+    )
+    
+    return bandpass
+

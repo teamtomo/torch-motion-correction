@@ -5,13 +5,12 @@ from torch_grid_utils import coordinate_grid
 from torch_image_interpolation import sample_image_2d
 from torch_fourier_shift import fourier_shift_dft_2d
 
-from torch_motion_correction.evaluate_deformation_grid import evaluate_deformation_grid_lazy, evaluate_deformation_grid
-
-import time
+from torch_motion_correction.evaluate_deformation_grid import (
+    evaluate_deformation_grid,
+)
 
 def correct_motion(
     image: torch.Tensor,
-    pixel_spacing: float,
     deformation_grid: torch.Tensor,
     grad: bool = False,
     device: torch.device = None,
@@ -34,7 +33,6 @@ def correct_motion(
         corrected_frames = [
             _correct_frame(
                 frame=frame,
-                pixel_spacing=pixel_spacing,
                 deformation_grid=deformation_grid,
                 t=frame_t,
             )
@@ -47,14 +45,9 @@ def correct_motion(
 
 def _correct_frame(
     frame: torch.Tensor,
-    pixel_spacing: float,
     deformation_grid: torch.Tensor,
     t: float  # [0, 1]
 ) -> torch.Tensor:
-
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t0 = time.time()
 
     # grab frame dimensions
     h, w = frame.shape
@@ -64,45 +57,23 @@ def _correct_frame(
         image_shape=(h, w),
         device=frame.device,
     )  # (h, w, 2) yx coords
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t1 = time.time()
 
     dim_lengths = torch.as_tensor([h - 1, w - 1], device=frame.device, dtype=torch.float32)
     normalized_pixel_grid = pixel_grid / dim_lengths
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t2 = time.time()
 
     # add normalized time coordinate to every pixel coordinate
     # (h, w, 2) -> (h, w, 3)
     # yx -> tyx
     tyx = F.pad(normalized_pixel_grid, pad=(1, 0), value=t)
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t3 = time.time()
 
     # evaluate interpolated shifts at every pixel
-    #evaluator = evaluate_deformation_grid_lazy(
-    #    deformation_grid=deformation_grid,
-    #    coordinates=tyx,
-    #)
-    # evaluate interpolated shifts at every pixel
-    shifts_angstroms = evaluate_deformation_grid(
+    shifts_px = evaluate_deformation_grid(
         deformation_grid=deformation_grid,
         tyx=tyx,
     )
-    # Extract the actual tensor values from the lazy evaluator
-    #shifts_angstroms = evaluator.evaluate_all()
-    shifts_px = shifts_angstroms
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t4 = time.time()
+
     # find pixel positions to sample image data at, accounting for deformations
     deformed_pixel_coords = pixel_grid + shifts_px
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t5 = time.time()
 
     # sample original image data
     corrected_frame = sample_image_2d(
@@ -110,16 +81,12 @@ def _correct_frame(
         coordinates=deformed_pixel_coords,
         interpolation='bicubic',
     )
-    if frame.is_cuda:
-        torch.cuda.synchronize()
-    t6 = time.time()
 
     return corrected_frame
 
 
 def correct_motion_batched(
     image: torch.Tensor,
-    pixel_spacing: float,
     deformation_grid: torch.Tensor,
     batch_size: int = None,
     grad: bool = False,
@@ -132,8 +99,6 @@ def correct_motion_batched(
     ----------
     image: torch.Tensor
         (t, h, w) array of images to motion correct
-    pixel_spacing: float
-        Pixel spacing in angstroms
     deformation_grid: torch.Tensor
         Deformation grid for motion correction
     batch_size: int, optional
@@ -164,7 +129,6 @@ def correct_motion_batched(
             # Process all frames at once
             corrected_frames = _correct_frames(
                 frames=image,
-                pixel_spacing=pixel_spacing,
                 deformation_grid=deformation_grid,
             )
         else:
@@ -175,7 +139,6 @@ def correct_motion_batched(
                 batch_frames = image[start_idx:end_idx]
                 batch_corrected = _correct_frames(
                     frames=batch_frames,
-                    pixel_spacing=pixel_spacing,
                     deformation_grid=deformation_grid,
                     frame_offset=start_idx,
                 )
@@ -187,7 +150,6 @@ def correct_motion_batched(
 
 def _correct_frames(
     frames: torch.Tensor,  # (t, h, w) or (batch_t, h, w)
-    pixel_spacing: float,
     deformation_grid: torch.Tensor,
     frame_offset: int = 0,
 ) -> torch.Tensor:
@@ -198,8 +160,6 @@ def _correct_frames(
     ----------
     frames: torch.Tensor
         (t, h, w) or (batch_t, h, w) array of frames to correct
-    pixel_spacing: float
-        Pixel spacing in angstroms
     deformation_grid: torch.Tensor
         Deformation grid for motion correction
     frame_offset: int
@@ -210,9 +170,6 @@ def _correct_frames(
     corrected_frames: torch.Tensor
         (t, h, w) or (batch_t, h, w) corrected frames
     """
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t0 = time.time()
     
     batch_t, h, w = frames.shape
     
@@ -222,17 +179,9 @@ def _correct_frames(
         device=frames.device,
     )  # (h, w, 2) yx coords
     
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t1 = time.time()
-    
     # Normalize pixel grid once
     dim_lengths = torch.as_tensor([h - 1, w - 1], device=frames.device, dtype=torch.float32)
     normalized_pixel_grid = pixel_grid / dim_lengths
-    
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t2 = time.time()
     
     # Create normalized time coordinates for all frames
     normalized_t = torch.linspace(0, 1, steps=batch_t, device=frames.device)
@@ -249,33 +198,20 @@ def _correct_frames(
     t_coords = normalized_t.view(-1, 1, 1, 1).expand(-1, h, w, 1)  # (batch_t, h, w, 1)
     tyx = torch.cat([t_coords, tyx], dim=-1)  # (batch_t, h, w, 3)
     
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t3 = time.time()
-    
     # Evaluate deformation grid for all frames at once
     # Reshape to (batch_t * h * w, 3) for batch evaluation
     tyx_flat = tyx.view(-1, 3)  # (batch_t * h * w, 3)
-    shifts_angstroms_flat = evaluate_deformation_grid(
+    shifts_px_flat = evaluate_deformation_grid(
         deformation_grid=deformation_grid,
         tyx=tyx_flat,
     )  # (batch_t * h * w, 2)
     
     # Reshape back to (batch_t, h, w, 2)
-    shifts_angstroms = shifts_angstroms_flat.view(batch_t, h, w, 2)
-    shifts_px = shifts_angstroms
-    
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t4 = time.time()
+    shifts_px = shifts_px_flat.view(batch_t, h, w, 2)
     
     # Find deformed pixel coordinates for all frames
     pixel_grid_expanded = pixel_grid.unsqueeze(0).expand(batch_t, -1, -1, -1)  # (batch_t, h, w, 2)
     deformed_pixel_coords = pixel_grid_expanded + shifts_px  # (batch_t, h, w, 2)
-    
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t5 = time.time()
     
     # Sample image data for all frames
     corrected_frames = []
@@ -289,15 +225,10 @@ def _correct_frames(
     
     corrected_frames = torch.stack(corrected_frames, dim=0)
     
-    if frames.is_cuda:
-        torch.cuda.synchronize()
-    t6 = time.time()
-    
     return corrected_frames
 
 def correct_motion_fast(
     image: torch.Tensor,
-    pixel_spacing: float,
     deformation_grid: torch.Tensor,
     device: torch.device = None,
 ) -> torch.Tensor:
@@ -312,8 +243,6 @@ def correct_motion_fast(
     ----------
     image: torch.Tensor
         (t, h, w) array of images to motion correct
-    pixel_spacing: float
-        Pixel spacing in angstroms
     deformation_grid: torch.Tensor
         Deformation field (2, t, 1, 1) for single patch correction
     device: torch.device, optional
@@ -360,38 +289,6 @@ def correct_motion_fast(
         fftshifted=False,
     )
     
-
-    
     corrected_frames = torch.fft.irfftn(shifted_fft, s=(h, w))
-    '''
-    corrected_frames = image.clone()
-    for i in range(t):
-        if abs(shifts[i,0]) > 1e-6 or abs(shifts[i,1]) > 1e-6:
-            corrected_frames[i] = apply_phase_shift(image[i], shifts[i,1].item(), shifts[i,0].item())
-    '''
+
     return corrected_frames
-
-
-def apply_phase_shift(image: torch.Tensor, shift_x: float, shift_y: float) -> torch.Tensor:
-    """Apply phase shift in Fourier space."""
-    if abs(shift_x) < 1e-6 and abs(shift_y) < 1e-6:
-        return image
-    
-    h, w = image.shape
-    
-    # Create frequency grids
-    freq_y = torch.fft.fftfreq(h, device=image.device)
-    freq_x = torch.fft.fftfreq(w, device=image.device)
-    
-    fy, fx = torch.meshgrid(freq_y, freq_x, indexing='ij')
-    
-    # Phase shift: exp(-2πi * (fx*shift_x + fy*shift_y))
-    phase_shift = torch.exp(-2j * torch.pi * (fx * shift_x + fy * shift_y))
-    
-    # Apply shift in Fourier space
-    image_fft = torch.fft.fft2(image)
-    shifted_fft = image_fft * phase_shift
-    shifted_image = torch.fft.ifft2(shifted_fft).real
-    
-    return shifted_image
-

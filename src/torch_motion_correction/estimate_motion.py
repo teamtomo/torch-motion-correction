@@ -14,6 +14,7 @@ from torch_motion_correction.patch_grid import patch_grid, patch_grid_lazy
 from torch_motion_correction.utils import (
     spatial_frequency_to_fftfreq,
     normalize_image,
+    prepare_bandpass_filter
 )
 
 
@@ -124,7 +125,7 @@ def estimate_motion(
         )  # (b, ph, pw, h, w)
 
         # apply fourier filters
-        bandpass = _prepare_bandpass_filter(
+        bandpass = prepare_bandpass_filter(
             frequency_range=frequency_range,
             patch_shape=(ph, pw),
             pixel_spacing=pixel_spacing,
@@ -318,7 +319,7 @@ def estimate_motion_lazy(
         )
 
         # Apply frequency filters
-        bandpass = _prepare_bandpass_filter(
+        bandpass = prepare_bandpass_filter(
             frequency_range=frequency_range,
             patch_shape=(ph, pw),
             pixel_spacing=pixel_spacing,
@@ -372,33 +373,3 @@ def estimate_motion_lazy(
     #final_deformation_field = deformation_field.data - average_shift
     final_deformation_field = deformation_field.data
     return final_deformation_field
-
-
-def _prepare_bandpass_filter(
-    frequency_range: tuple[float, float],  # angstroms
-    patch_shape: tuple[int, int],
-    pixel_spacing: float,  # angstroms
-    refinement_fraction: float,  # [0, 1]
-    device: torch.device = None,
-) -> torch.Tensor:
-    # grab patch dimensions
-    ph, pw = patch_shape
-
-    # calculate filter cutoffs in cycles/pixel
-    cuton, cutoff_max = torch.as_tensor(frequency_range, device=device).float()  # angstroms
-    cutoff = torch.lerp(cuton, cutoff_max, refinement_fraction)
-    low_fftfreq = spatial_frequency_to_fftfreq(1 / cuton, spacing=pixel_spacing)
-    high_fftfreq = spatial_frequency_to_fftfreq(1 / cutoff, spacing=pixel_spacing)
-
-    # prepapre bandpass
-    bandpass = bandpass_filter(
-        low=low_fftfreq,
-        high=high_fftfreq,
-        falloff=0,
-        image_shape=(ph, pw),
-        rfft=True,
-        fftshift=False,
-        device=device
-    )
-
-    return bandpass
