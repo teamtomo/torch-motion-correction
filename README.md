@@ -9,3 +9,10 @@
 Motion estimation and correction in PyTorch.
 
 work in progress
+
+## Authors
+
+- Alister Burt (started when working at MRC-LMB, continued at Genentech)
+- Josh Dickerson (UC Berkeley)
+- Matthew Giammar (UC Berkeley)
+
