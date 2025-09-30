@@ -70,9 +70,12 @@ def _correct_frame(
         image=frame,
         coordinates=deformation_grid_interpolants,
         interpolation='bicubic'
-    )
+    )  # (yx, h, w)
 
     # find pixel positions to sample image data at, accounting for deformations
+    pixel_shifts = einops.rearrange(pixel_shifts, 'yx h w -> h w yx')
+
+    # todo: make sure semantics around deformation field interpolants (i.e. spatiotemporally resolved shifts) are crystal clear
     deformed_pixel_coords = pixel_grid + pixel_shifts
 
     # sample original image data
