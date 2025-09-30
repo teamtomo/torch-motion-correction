@@ -3,8 +3,8 @@ import mrcfile
 import numpy as np
 import torch
 from torch_motion_correction import (
-    estimate_motion_lazy, 
-    correct_motion, 
+    estimate_local_motion,
+    correct_motion,
     correct_motion_batched,
     correct_motion_fast,
     estimate_motion,
@@ -206,7 +206,7 @@ def motion_estimate_and_correct(movie : torch.Tensor, pixel_size : float) -> tor
     print(f"Testing on gpu")
     movie = movie.to(device="cuda:1")
     
-    deformation_grid = estimate_motion_lazy(
+    deformation_grid = estimate_local_motion(
         image=movie,
         pixel_spacing=pixel_size,
         deformation_field_resolution=(54, 6, 6),  
