@@ -209,12 +209,12 @@ def motion_estimate_and_correct(movie : torch.Tensor, pixel_size : float) -> tor
     deformation_grid = estimate_motion_lazy(
         image=movie,
         pixel_spacing=pixel_size,
-        deformation_field_resolution=(54, 8, 8),  
-        patch_sidelength=512,
-        n_patches_per_batch=40,  
-        learning_rate=0.1,      
-        n_iterations=400,        
-        optimizer='adam',       # Try L-BFGS
+        deformation_field_resolution=(54, 6, 6),  
+        patch_sidelength=1024,
+        n_patches_per_batch=10,  
+        learning_rate=1,      
+        n_iterations=5000,        
+        optimizer='lbfgs',       # Try L-BFGS
         b_factor=500,
         frequency_range=(300, 10),
     ) 
@@ -389,52 +389,53 @@ def main():
 
     movie_whole_image = motion_estimate_and_correct_cross_correlation(movie, pixel_size)
 
-    movie_patches = motion_estimate_and_correct_cross_correlation_patches(movie, pixel_size)
+    #movie_patches = motion_estimate_and_correct_cross_correlation_patches(movie, pixel_size)
+    #movie_patches = motion_estimate_and_correct_cross_correlation_refined(movie, pixel_size)
 
-
+    movie = motion_estimate_and_correct(movie_whole_image, pixel_size)
 
     print(f"summing movie {eer_file}...")
-    #non_dw_sum = torch.sum(movie, dim=0)
+    non_dw_sum = torch.sum(movie, dim=0)
     non_dw_sum_whole_image = torch.sum(movie_whole_image, dim=0)
-    non_dw_sum_patches = torch.sum(movie_patches, dim=0)
+    #non_dw_sum_patches = torch.sum(movie_patches, dim=0)
     #non_dw_sum_refine_deformation_field = torch.sum(movie_refine_deformation_field, dim=0)
     print(f"Dose weighting movie {eer_file}...")
-    #dw_sum = dose_weight(movie)
+    dw_sum = dose_weight(movie)
     dw_sum_whole_image = dose_weight(movie_whole_image)
-    dw_sum_patches = dose_weight(movie_patches)
+    #dw_sum_patches = dose_weight(movie_patches)
     #dw_sum_refine_deformation_field = dose_weight(movie_refine_deformation_field)
     # Move tensors to cpu if they are on gpu before saving
-    #non_dw_sum_cpu = non_dw_sum.cpu() if non_dw_sum.is_cuda else non_dw_sum
-    #dw_sum_cpu = dw_sum.cpu() if dw_sum.is_cuda else dw_sum
+    non_dw_sum_cpu = non_dw_sum.cpu() if non_dw_sum.is_cuda else non_dw_sum
+    dw_sum_cpu = dw_sum.cpu() if dw_sum.is_cuda else dw_sum
     non_dw_sum_whole_image_cpu = non_dw_sum_whole_image.cpu() if non_dw_sum_whole_image.is_cuda else non_dw_sum_whole_image
     dw_sum_whole_image_cpu = dw_sum_whole_image.cpu() if dw_sum_whole_image.is_cuda else dw_sum_whole_image
-    non_dw_sum_patches_cpu = non_dw_sum_patches.cpu() if non_dw_sum_patches.is_cuda else non_dw_sum_patches
-    dw_sum_patches_cpu = dw_sum_patches.cpu() if dw_sum_patches.is_cuda else dw_sum_patches
+    #non_dw_sum_patches_cpu = non_dw_sum_patches.cpu() if non_dw_sum_patches.is_cuda else non_dw_sum_patches
+    #dw_sum_patches_cpu = dw_sum_patches.cpu() if dw_sum_patches.is_cuda else dw_sum_patches
     #non_dw_sum_refine_deformation_field_cpu = non_dw_sum_refine_deformation_field.cpu() if non_dw_sum_refine_deformation_field.is_cuda else non_dw_sum_refine_deformation_field
     #dw_sum_refine_deformation_field_cpu = dw_sum_refine_deformation_field.cpu() if dw_sum_refine_deformation_field.is_cuda else dw_sum_refine_deformation_field
     # Convert to numpy for processing and saving
-    #non_dw_sum_numpy = non_dw_sum_cpu.numpy()
-    #dw_sum_numpy = dw_sum_cpu.numpy()
+    non_dw_sum_numpy = non_dw_sum_cpu.numpy()
+    dw_sum_numpy = dw_sum_cpu.numpy()
     non_dw_sum_whole_image_numpy = non_dw_sum_whole_image_cpu.numpy()
     dw_sum_whole_image_numpy = dw_sum_whole_image_cpu.numpy()
-    non_dw_sum_patches_numpy = non_dw_sum_patches_cpu.numpy()
-    dw_sum_patches_numpy = dw_sum_patches_cpu.numpy()
+    #non_dw_sum_patches_numpy = non_dw_sum_patches_cpu.numpy()
+    #dw_sum_patches_numpy = dw_sum_patches_cpu.numpy()
     #non_dw_sum_refine_deformation_field_numpy = non_dw_sum_refine_deformation_field_cpu.numpy()
     #dw_sum_refine_deformation_field_numpy = dw_sum_refine_deformation_field_cpu.numpy()
     # Save original versions (without hot pixel removal on final images)
     print(f"Saving original sums {eer_file}...")
-    #with mrcfile.new(f"ttMotionCor/non_dw_sum_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
-        #f.set_data(non_dw_sum_numpy)
-    #with mrcfile.new(f"ttMotionCor/dw_sum_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
-        #f.set_data(dw_sum_numpy)
+    with mrcfile.new(f"ttMotionCor/non_dw_sum_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
+        f.set_data(non_dw_sum_numpy)
+    with mrcfile.new(f"ttMotionCor/dw_sum_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
+        f.set_data(dw_sum_numpy)
     with mrcfile.new(f"ttMotionCor/non_dw_sum_whole_image_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
         f.set_data(non_dw_sum_whole_image_numpy)
     with mrcfile.new(f"ttMotionCor/dw_sum_whole_image_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
         f.set_data(dw_sum_whole_image_numpy)
-    with mrcfile.new(f"ttMotionCor/non_dw_sum_patches_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
-        f.set_data(non_dw_sum_patches_numpy)
-    with mrcfile.new(f"ttMotionCor/dw_sum_patches_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
-        f.set_data(dw_sum_patches_numpy)
+    #with mrcfile.new(f"ttMotionCor/non_dw_sum_patches_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
+        #f.set_data(non_dw_sum_patches_numpy)
+    #with mrcfile.new(f"ttMotionCor/dw_sum_patches_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
+        #f.set_data(dw_sum_patches_numpy)
     #with mrcfile.new(f"ttMotionCor/non_dw_sum_refine_deformation_field_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
         #f.set_data(non_dw_sum_refine_deformation_field_numpy)
     #with mrcfile.new(f"ttMotionCor/dw_sum_refine_deformation_field_original2_{eer_file[:-4]}.mrc", overwrite=True) as f:
@@ -455,9 +456,9 @@ def main():
         f.set_data(dw_sum_hp_corrected)
     '''
     # Save non-aligned sum (calculated before motion correction)
-    print(f"Saving non-aligned sum {eer_file}...")
-    with mrcfile.new(f"ttMotionCor/non_aligned_sum_{eer_file[:-4]}.mrc", overwrite=True) as f:
-        f.set_data(np.float32(non_aligned_sum))
+    #print(f"Saving non-aligned sum {eer_file}...")
+    #with mrcfile.new(f"ttMotionCor/non_aligned_sum_{eer_file[:-4]}.mrc", overwrite=True) as f:
+        #f.set_data(np.float32(non_aligned_sum))
 
 
     

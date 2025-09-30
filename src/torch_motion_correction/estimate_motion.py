@@ -272,6 +272,7 @@ def estimate_motion_lazy(
         motion_optimiser = torch.optim.LBFGS(
             params=deformation_field.parameters(),
             lr=learning_rate,
+            line_search_fn="strong_wolfe",
         )
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer}. Choose 'adam' or 'lbfgs'.")
@@ -298,15 +299,25 @@ def estimate_motion_lazy(
         patch_subset = torch.fft.rfftn(patch_subset, dim=(-2, -1))
         
         # Use the middle frame as the reference patch
-        middle_frame = patch_subset.shape[0] // 2
+        #middle_frame = patch_subset.shape[0] // 2
         reference_patches = torch.mean(patch_subset, dim=0)
 
         # Get patch centers for the selected patches (matching non-lazy version)
         patch_subset_centers = data_patch_positions[:, idx_gh, idx_gw]
+
+                # Apply frequency filters can be applied outside if not keep fraction
+        bandpass = prepare_bandpass_filter(
+            frequency_range=frequency_range,
+            patch_shape=(ph, pw),
+            pixel_spacing=pixel_spacing,
+            #refinement_fraction=i / (n_iterations - 1),
+            device=device
+        )
+
+        patch_subset = patch_subset * bandpass * b_factor_envelope
         
         # Predict shifts at patch centers
         predicted_shifts = -1 * deformation_field(patch_subset_centers)
-        print(f"predicted_shifts shape: {predicted_shifts.shape}")
         
         # Shift patches by predicted shifts
         predicted_shifts_px = predicted_shifts
@@ -318,15 +329,8 @@ def estimate_motion_lazy(
             fftshifted=False,
         )
 
-        # Apply frequency filters
-        bandpass = prepare_bandpass_filter(
-            frequency_range=frequency_range,
-            patch_shape=(ph, pw),
-            pixel_spacing=pixel_spacing,
-            refinement_fraction=i / (n_iterations - 1),
-            device=device
-        )
-        shifted_patches = shifted_patches * bandpass * b_factor_envelope
+
+        #shifted_patches = shifted_patches * bandpass * b_factor_envelope
 
         # Optimization step
         if optimizer.lower() == 'adam':
@@ -370,6 +374,5 @@ def estimate_motion_lazy(
 
     # Return final deformation field
     average_shift = torch.mean(deformation_field.data)
-    #final_deformation_field = deformation_field.data - average_shift
-    final_deformation_field = deformation_field.data
+    final_deformation_field = deformation_field.data - average_shift
     return final_deformation_field
