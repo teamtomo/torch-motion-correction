@@ -5,8 +5,8 @@ from torch_grid_utils import coordinate_grid
 from torch_image_interpolation import sample_image_2d
 from torch_fourier_shift import fourier_shift_dft_2d
 
-from torch_motion_correction.evaluate_deformation_grid import (
-    evaluate_deformation_grid, evaluate_deformation_grid_at_t,
+from torch_motion_correction.evaluate_deformation_field import (
+    evaluate_deformation_field, evaluate_deformation_field_at_t,
 )
 
 from torch_image_interpolation.grid_sample_utils import array_to_grid_sample
@@ -36,8 +36,8 @@ def correct_motion(
         corrected_frames = [
             _correct_frame(
                 frame=frame,
-                frame_deformation_grid=evaluate_deformation_grid_at_t(
-                    deformation_grid=deformation_grid,
+                frame_deformation_grid=evaluate_deformation_field_at_t(
+                    deformation_field=deformation_grid,
                     t=frame_t,
                     grid_shape=(10 * gh, 10 * gw)
                 )
@@ -210,8 +210,8 @@ def _correct_frames(
     # Evaluate deformation grid for all frames at once
     # Reshape to (batch_t * h * w, 3) for batch evaluation
     tyx_flat = tyx.view(-1, 3)  # (batch_t * h * w, 3)
-    shifts_px_flat = evaluate_deformation_grid(
-        deformation_grid=deformation_grid,
+    shifts_px_flat = evaluate_deformation_field(
+        deformation_field=deformation_grid,
         tyx=tyx_flat,
     )  # (batch_t * h * w, 2)
 
