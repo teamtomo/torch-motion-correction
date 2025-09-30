@@ -87,13 +87,15 @@ def prepare_bandpass_filter(
     frequency_range: tuple[float, float],  # angstroms
     patch_shape: tuple[int, int],
     pixel_spacing: float,  # angstroms
+    refinement_fraction: float = 1.0,  # [0, 1]
     device: torch.device = None,
 ) -> torch.Tensor:
     """Prepare bandpass filter for cross-correlation (fixed, no refinement)."""
     ph, pw = patch_shape
 
     # Use the higher resolution cutoff (smaller angstrom value)
-    cuton, cutoff = frequency_range
+    cuton, cutoff_max = torch.as_tensor(frequency_range).float()  # angstroms
+    cutoff = torch.lerp(cuton, cutoff_max, refinement_fraction)
     low_fftfreq = spatial_frequency_to_fftfreq(1 / cuton, spacing=pixel_spacing)
     high_fftfreq = spatial_frequency_to_fftfreq(1 / cutoff, spacing=pixel_spacing)
 

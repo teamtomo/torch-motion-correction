@@ -15,8 +15,8 @@ from torch_motion_correction.patch_grid import (
     patch_grid_lazy,
     patch_grid_centers,
 )
+from torch_motion_correction.evaluate_deformation_field import resample_deformation_field
 from torch_motion_correction.utils import (
-    spatial_frequency_to_fftfreq,
     normalize_image,
     prepare_bandpass_filter,
 )
@@ -403,6 +403,7 @@ def estimate_motion_lazy(
     image: torch.Tensor,  # (t, h, w)
     pixel_spacing: float,  # angstroms
     deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
+    initial_deformation_field: torch.Tensor,  # (yx, nt, nh, nw)
     b_factor: float = 500,
     frequency_range: tuple[float, float] = (300, 10),  # angstroms e.g. (300, 15)
     patch_sidelength: int = 512,
@@ -428,12 +429,28 @@ def estimate_motion_lazy(
         image = image.to(device)
 
     # grab image dims
+    # grab image and deformation field dims
     t, h, w = image.shape
+    nt, nh, nw = deformation_field_resolution
+
+    # initialize deformation field
+    # semantics: resample existing to target resolution or initialize as all zeros
+    if initial_deformation_field is None:
+        deformation_field = CubicCatmullRomGrid3d(
+            resolution=deformation_field_resolution,
+            n_channels=2
+        ).to(device)
+    else:
+        deformation_field_data = resample_deformation_field(
+            deformation_field=initial_deformation_field,
+            target_resolution=(nt, nh, nw),
+        )
+        deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
 
     # normalize image based on stats from central 50% of image
     image = normalize_image(image)
 
-    # Create lazy patch grid - no patches extracted yet!
+    # create lazy patch grid - no patches extracted yet!
     ph, pw = patch_sidelength, patch_sidelength
     lazy_patch_grid, data_patch_positions = patch_grid_lazy(
         images=image,
@@ -443,6 +460,7 @@ def estimate_motion_lazy(
     )
 
     # Get grid dimensions
+    # get patch grid dimensions
     grid_shape = lazy_patch_grid.grid_shape
     if len(grid_shape) == 2:
         gh, gw = grid_shape
@@ -453,7 +471,7 @@ def estimate_motion_lazy(
 
     print(f"Total patches available: {total_patches} (lazy evaluation)")
 
-    # Create reusable filters and masks
+    # create reusable filters and masks
     mask = circle(
         radius=pw / 4, image_shape=(ph, pw), smoothing_radius=pw / 8, device=device
     )
@@ -466,11 +484,6 @@ def estimate_motion_lazy(
         fftshift=False,
         device=device,
     )
-
-    # Initialize deformation field
-    deformation_field = CubicCatmullRomGrid3d(
-        resolution=deformation_field_resolution, n_channels=2
-    ).to(device)
 
     # Normalize patch center positions to [0, 1]
     if len(data_patch_positions.shape) == 3:  # 2D case: (gh, gw, 2)
@@ -492,6 +505,7 @@ def estimate_motion_lazy(
         motion_optimiser = torch.optim.LBFGS(
             params=deformation_field.parameters(),
             lr=learning_rate,
+            line_search_fn="strong_wolfe",
         )
     else:
         raise ValueError(
@@ -524,15 +538,25 @@ def estimate_motion_lazy(
         patch_subset = torch.fft.rfftn(patch_subset, dim=(-2, -1))
 
         # Use the middle frame as the reference patch
-        middle_frame = patch_subset.shape[0] // 2
+        # middle_frame = patch_subset.shape[0] // 2
         reference_patches = torch.mean(patch_subset, dim=0)
 
         # Get patch centers for the selected patches (matching non-lazy version)
         patch_subset_centers = data_patch_positions[:, idx_gh, idx_gw]
 
+        # Apply frequency filters can be applied outside if not keep fraction
+        bandpass = prepare_bandpass_filter(
+            frequency_range=frequency_range,
+            patch_shape=(ph, pw),
+            pixel_spacing=pixel_spacing,
+            # refinement_fraction=i / (n_iterations - 1),
+            device=device
+        )
+
+        patch_subset = patch_subset * bandpass * b_factor_envelope
+
         # Predict shifts at patch centers
         predicted_shifts = -1 * deformation_field(patch_subset_centers)
-        print(f"predicted_shifts shape: {predicted_shifts.shape}")
 
         # Shift patches by predicted shifts
         predicted_shifts_px = predicted_shifts
@@ -544,15 +568,7 @@ def estimate_motion_lazy(
             fftshifted=False,
         )
 
-        # Apply frequency filters
-        bandpass = prepare_bandpass_filter(
-            frequency_range=frequency_range,
-            patch_shape=(ph, pw),
-            pixel_spacing=pixel_spacing,
-            refinement_fraction=i / (n_iterations - 1),
-            device=device,
-        )
-        shifted_patches = shifted_patches * bandpass * b_factor_envelope
+        # shifted_patches = shifted_patches * bandpass * b_factor_envelope
 
         # Optimization step
         if optimizer.lower() == "adam":
@@ -600,6 +616,5 @@ def estimate_motion_lazy(
 
     # Return final deformation field
     average_shift = torch.mean(deformation_field.data)
-    # final_deformation_field = deformation_field.data - average_shift
-    final_deformation_field = deformation_field.data
+    final_deformation_field = deformation_field.data - average_shift
     return final_deformation_field
