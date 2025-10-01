@@ -9,11 +9,12 @@ except PackageNotFoundError:
 __author__ = "Alister Burt"
 __email__ = "alisterburt@gmail.com"
 
-from torch_motion_correction.estimate_local_motion import estimate_motion, estimate_local_motion
+from torch_motion_correction.estimate_local_motion import estimate_local_motion
 from torch_motion_correction.correct_motion import (
     correct_motion, 
     correct_motion_batched, 
     correct_motion_fast,
+    correct_motion_slow,
 )
 from torch_motion_correction.evaluate_deformation_field import (
     evaluate_deformation_field,
@@ -35,6 +36,7 @@ __all__ = [
     "correct_motion",
     "correct_motion_batched",
     "correct_motion_fast",
+    "correct_motion_slow",
     "evaluate_deformation_field",
     "estimate_motion_cross_correlation_whole_image",
     "estimate_motion_cross_correlation_patches",

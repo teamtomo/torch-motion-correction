@@ -47,6 +47,9 @@ def estimate_local_motion(
     else:
         image = image.to(device)
 
+    if initial_deformation_field is not None:
+        initial_deformation_field = initial_deformation_field.to(device)
+
     # grab image and deformation field dims
     t, h, w = image.shape
     nt, nh, nw = deformation_field_resolution
@@ -63,6 +66,8 @@ def estimate_local_motion(
             deformation_field=initial_deformation_field,
             target_resolution=(nt, nh, nw),
         )
+        
+        print(f"Resampled initial deformation field to {deformation_field_data.shape}")
         deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
 
     # normalize image based on stats from central 50% of image
@@ -192,6 +197,7 @@ def estimate_local_motion(
                 motion_optimiser.zero_grad()
                 # Recompute forward pass in closure for L-BFGS
                 pred_shifts = -1 * deformation_field(patch_subset_centers)
+                #pred_shifts = deformation_field(patch_subset_centers)
                 pred_shifts_px = pred_shifts
                 shift_patches = fourier_shift_dft_2d(
                     dft=patch_subset,
