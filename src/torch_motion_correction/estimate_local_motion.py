@@ -1,5 +1,6 @@
 from datetime import datetime
 import random
+from typing import Iterator
 
 import einops
 import numpy as np
@@ -15,7 +16,9 @@ from torch_motion_correction.patch_grid import (
     patch_grid_lazy,
     patch_grid_centers,
 )
-from torch_motion_correction.evaluate_deformation_field import resample_deformation_field
+from torch_motion_correction.evaluate_deformation_field import (
+    resample_deformation_field,
+)
 from torch_motion_correction.utils import (
     normalize_image,
     prepare_bandpass_filter,
@@ -29,15 +32,25 @@ class ImagePatchIterator:
 
     Attributes
     ----------
-        image: The input image to be patched (t, H, W).
-        image_shape: Shape of the image to be patched (t, H, W).
-        patch_size: Size of the patches to extract (ph, pw).
-        control_points: Control points in pixel coordinates (t, gh, gw, 3).
-        control_points_normalized: Control points normalized to [0, 1] (t, gh, gw, 3).
+    image : torch.Tensor
+        The input image (movie frame stack) to draw patches from with shape
+        (t, H, W) where t is the number of frames, H is height and W is width.
+    image_shape : tuple[int, int, int]
+        Shape of the input image (t, H, W).
+    patch_size : tuple[int, int]
+        Size of the patches to extract (ph, pw) in terms of pixels.
+    control_points : torch.Tensor
+        Control points in pixel coordinates with shape (t, gh, gw, 3) where
+        gh and gw are the number of control points in height and width dimensions,
+        and 3 corresponds to (time, y, x) coordinates.
+    control_points_normalized : torch.Tensor
+        Control points normalized to [0, 1] in all dimensions with shape
 
     Methods
     -------
-        get_iterator(batch_size: int) -> Iterator[torch.Tensor, torch.Tensor]:
+    get_iterator(batch_size: int, randomized: bool = True) -> Iterator[tuple[torch.Tensor, torch.Tensor]]
+        Data-loader style iterator yielding batches of image patches and corresponding
+        normalized control points for each batch.
     """
 
     image: torch.Tensor  # (t, H, W)
@@ -51,7 +64,6 @@ class ImagePatchIterator:
     def __init__(
         self,
         image: torch.Tensor,
-        image_shape: tuple[int, int, int],
         patch_size: tuple[int, int],
         control_points: torch.Tensor,
     ) -> None:
@@ -59,14 +71,29 @@ class ImagePatchIterator:
 
         NOTE: Control points are expected to be in (t, gh, gw, 3) format, and only
         constant control points over time are currently supported.
+        
+        Parameters
+        ----------
+        image : torch.Tensor
+            The input image to be patched (t, H, W).\
+                
         """
+        assert len(image.shape) == 3, "Image must be 3D (t, H, W)"
+        assert len(patch_size) == 2, "Patch size must be 2D (ph, pw)"
+        assert (len(control_points.shape) == 4) and (
+            control_points.shape[-1] == 3
+        ), "Control points must be (t, gh, gw, 3)"
+        assert (
+            image.shape[0] == control_points.shape[0]
+        ), "Image time dimension and control points time dimension must match"
+
         self.image = image
-        self.image_shape = image_shape
+        self.image_shape = image.shape
         self.patch_size = patch_size
         self.control_points = control_points.to(image.device)
 
         # Normalize control points to [0, 1] in all dimensions
-        t, H, W = image_shape
+        t, H, W = self.image_shape
         self.control_points_normalized = control_points.clone().float()
         self.control_points_normalized[..., 0] /= float(t - 1)
         self.control_points_normalized[..., 1] /= float(H - 1)
@@ -83,8 +110,24 @@ class ImagePatchIterator:
                 "Control points varying over time not supported yet"
             )
 
+        # Check that box extraction around extrema won't go out of bounds
+        ph, pw = patch_size
+        min_y = torch.min(control_points[..., 1]).item()
+        max_y = torch.max(control_points[..., 1]).item()
+        min_x = torch.min(control_points[..., 2]).item()
+        max_x = torch.max(control_points[..., 2]).item()
+        err_msg = (
+            f"Patch size {patch_size} too large for control points in image "
+            f"of shape {self.image_shape} where control points range from "
+            f"y: [{min_y}, {max_y}], x: [{min_x}, {max_x}]"
+        )
+        assert min_y - ph // 2 >= 0, err_msg
+        assert max_y + ph // 2 < H, err_msg
+        assert min_x - pw // 2 >= 0, err_msg
+        assert max_x + pw // 2 < W, err_msg
+
     def get_iterator(
-        self, batch_size: int = 1
+        self, batch_size: int = 1, randomized: bool = True
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """Returns an iterator over image patches and normalized control points.
 
@@ -95,11 +138,17 @@ class ImagePatchIterator:
 
         Parameters
         ----------
-            batch_size: Number of patches to return simultaneously. Default is 1.
+        batch_size : int
+            Number of patches to return simultaneously. Default is 1.
+        randomized : bool
+            Whether to randomize the order of patches. Default is True.
 
         Returns
         -------
-            Iterator yielding tuples of (image_patches, control_points).
+        Iterator[tuple[torch.Tensor, torch.Tensor]]
+            An iterator yielding tuples of (patches, normalized_control_points)
+            where patches is a tensor of shape (batch_size, t, ph, pw) and
+            normalized_control_points is a tensor of shape (batch_size, t, 3).
         """
 
         def inner_iterator():
@@ -112,6 +161,13 @@ class ImagePatchIterator:
             _control_points_normalized = self.control_points_normalized[0].reshape(
                 -1, 3
             )
+
+            # Apply randomization if requested
+            indices = list(range(gh * gw))
+            if randomized:
+                random.shuffle(indices)
+                _control_points = _control_points[indices]
+                _control_points_normalized = _control_points_normalized[indices]
 
             for i in range(0, gh * gw, batch_size):
                 batch_control_points = _control_points[i : i + batch_size]  # (b, 3)
@@ -135,7 +191,12 @@ class ImagePatchIterator:
 
                 patches = torch.stack(patches)  # (b, t, ph, pw)
 
-                yield patches, batch_control_points_normalized  # (b, t, 3)
+                # Expand to include all time points for each batch element
+                batch_control_points_all_times = (
+                    batch_control_points_normalized.unsqueeze(1).expand(-1, t, -1)
+                )
+
+                yield patches, batch_control_points_all_times  # (b, t, 3)
 
         return inner_iterator()
 
@@ -206,12 +267,12 @@ def estimate_motion(
 
     # initialise optimiser and detach data
     if optimizer.lower() == "adam":
-        motion_optimiser = torch.optim.Adam(
+        motion_optimizer = torch.optim.Adam(
             params=deformation_field.parameters(),
             lr=learning_rate,
         )
     elif optimizer.lower() == "lbfgs":
-        motion_optimiser = torch.optim.LBFGS(
+        motion_optimizer = torch.optim.LBFGS(
             params=deformation_field.parameters(),
             lr=learning_rate,
         )
@@ -260,13 +321,13 @@ def estimate_motion(
         if optimizer.lower() == "adam":
             # calculate the loss, MSE between data patches and reference patches
             loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
-            motion_optimiser.zero_grad()
+            motion_optimizer.zero_grad()
             loss.backward()
-            motion_optimiser.step()
+            motion_optimizer.step()
         elif optimizer.lower() == "lbfgs":
 
             def closure():
-                motion_optimiser.zero_grad()
+                motion_optimizer.zero_grad()
                 # Recompute forward pass in closure for L-BFGS
                 pred_shifts = -1 * deformation_field(patch_subset_centers)
                 pred_shifts_px = pred_shifts / pixel_spacing
@@ -286,7 +347,7 @@ def estimate_motion(
                 loss.backward()
                 return loss
 
-            loss = motion_optimiser.step(closure)
+            loss = motion_optimizer.step(closure)
             # Extract loss value for logging
             if isinstance(loss, torch.Tensor):
                 loss = loss.item()
@@ -306,17 +367,202 @@ def estimate_motion(
     return final_deformation_field
 
 
+def _setup_optimizer(
+    optimizer_type: str,
+    parameters: list[torch.Tensor],
+    **kwargs,
+) -> torch.optim.Optimizer:
+    """Helper function to setup optimizer with given parameters and kwargs."""
+    if optimizer_type.lower() == "adam":
+        lr = kwargs.get("lr", 0.01)
+        betas = kwargs.get("betas", (0.9, 0.999))
+        eps = kwargs.get("eps", 1e-08)
+        weight_decay = kwargs.get("weight_decay", 0)
+        amsgrad = kwargs.get("amsgrad", False)
+        return torch.optim.Adam(
+            params=parameters,
+            lr=lr,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
+            amsgrad=amsgrad,
+        )
+    elif optimizer_type.lower() == "lbfgs":
+        lr = kwargs.get("lr", 1)
+        max_iter = kwargs.get("max_iter", 20)
+        max_eval = kwargs.get("max_eval", None)
+        tolerance_grad = kwargs.get("tolerance_grad", 1e-07)
+        tolerance_change = kwargs.get("tolerance_change", 1e-09)
+        history_size = kwargs.get("history_size", 100)
+        line_search_fn = kwargs.get("line_search_fn", "strong_wolfe")
+        return torch.optim.LBFGS(
+            params=parameters,
+            lr=lr,
+            max_iter=max_iter,
+            max_eval=max_eval,
+            tolerance_grad=tolerance_grad,
+            tolerance_change=tolerance_change,
+            history_size=history_size,
+            line_search_fn=line_search_fn,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported optimizer: {optimizer_type}. Choose 'adam' or 'lbfgs'."
+        )
+
+
+def _compute_forward_pass(
+    deformation_field: CubicCatmullRomGrid3d,
+    patch_subset: torch.Tensor,
+    batch_subset_centers: torch.Tensor,
+    ph: int,
+    pw: int,
+    b_factor_envelope: torch.Tensor = None,
+    bandpass: torch.Tensor = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the forward pass for motion estimation for a batch of patches.
+
+    Parameters
+    ----------
+    deformation_field : CubicCatmullRomGrid3d
+        The deformation field model to predict shifts.
+    patch_subset : torch.Tensor
+        A batch of image patches in Fourier space with shape (b, t, ph, pw).
+    batch_subset_centers : torch.Tensor
+        Normalized control point centers for the batch with shape (b, t, 3).
+    ph : int
+        Patch height in pixels.
+    pw : int
+        Patch width in pixels.
+    b_factor_envelope : torch.Tensor | None
+        The B-factor envelope to apply in Fourier space with shape (ph, pw//2 + 1).
+        If None, no envelope is applied.
+    bandpass : torch.Tensor | None
+        The bandpass filter to apply in Fourier space with shape (ph, pw//2 + 1).
+        If None, no bandpass is applied.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        A tuple containing:
+        - shifted_patches: The shifted patches after applying predicted shifts and
+          filters, with shape (b, t, ph, pw//2 + 1).
+        - predicted_shifts: The predicted shifts from the deformation field,
+          with shape (b, t, 2).
+    """
+    predicted_shifts = -1 * deformation_field(batch_subset_centers)
+
+    # ### DEBUGGING
+    # print("DEBUGGING: predicted_shifts.shape", predicted_shifts.shape)
+    # print("DEBUGGING: patch_subset.shape", patch_subset.shape)
+    # print("DEBUGGING: batch_subset_centers.shape", batch_subset_centers.shape)
+
+    # Shift the patches by the predicted shifts
+    shifted_patches = fourier_shift_dft_2d(
+        dft=patch_subset,
+        image_shape=(ph, pw),
+        shifts=predicted_shifts,
+        rfft=True,
+        fftshifted=False,
+    )  # (b, t, ph, pw//2 + 1)
+
+    # Apply Fourier filters
+    if bandpass is not None:
+        shifted_patches = shifted_patches * bandpass
+
+    if b_factor_envelope is not None:
+        shifted_patches = shifted_patches * b_factor_envelope
+
+    return shifted_patches, predicted_shifts
+
+
+def _optimizer_step_adam(
+    motion_optimizer: torch.optim.Adam,
+    shifted_patches: torch.Tensor,
+    reference_patches: torch.Tensor,
+) -> float:
+    """Optimizer step for Adam optimizer."""
+    # Using squared difference for loss
+    loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
+    motion_optimizer.zero_grad()
+    loss.backward()
+    motion_optimizer.step()
+
+    return loss.item()
+
+
+def _optimizer_step_lbfgs(
+    motion_optimizer: torch.optim.LBFGS,
+    deformation_field: CubicCatmullRomGrid3d,
+    patch_subset: torch.Tensor,
+    patch_subset_centers: torch.Tensor,
+    patch_shape: tuple[int, int],
+    bandpass: torch.Tensor | None,
+    b_factor_envelope: torch.Tensor | None,
+) -> float:
+    """Optimizer step for L-BFGS optimizer."""
+
+    def closure():
+        motion_optimizer.zero_grad()
+        # Recompute forward pass in closure for L-BFGS
+        shift_patches, _ = _compute_forward_pass(
+            deformation_field=deformation_field,
+            patch_subset=patch_subset,
+            batch_subset_centers=patch_subset_centers,
+            ph=patch_shape[0],
+            pw=patch_shape[1],
+            b_factor_envelope=b_factor_envelope,
+            bandpass=bandpass,
+        )
+        # Use same stable reference in closure
+        reference_patches_closure = torch.mean(patch_subset, dim=0)
+        loss = torch.mean((shift_patches - reference_patches_closure).abs() ** 2)
+        loss.backward()
+        return loss
+
+    loss = motion_optimizer.step(closure)
+    # Extract loss value for logging
+    if isinstance(loss, torch.Tensor):
+        return loss.item()
+    else:
+        return float(loss) if loss is not None else 0.0
+
+
 def estimate_motion_new(
     image: torch.Tensor,  # (t, H, W)
     pixel_spacing: float,  # Angstroms
-    deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
     patch_size: tuple[int, int],  # (ph, pw)
+    deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
+    initial_deformation_field: torch.Tensor | None,  # (yx, nt, nh, nw)
     device: torch.device = None,
     n_iterations: int = 100,
+    b_factor: float = 500,
+    frequency_range: tuple[float, float] = (300, 10),
+    optimizer_type: str = "adam",
+    optimizer_kwargs: dict | None = None,
 ) -> torch.Tensor:
     """Estimate motion (new method)
 
-    TODO: Docstring
+    Parameters
+    ----------
+    image: torch.Tensor
+        (t, H, W) image to estimate motion from where t is the number of frames,
+        H is the height, and W is the width.
+    pixel_spacing: float
+        Pixel spacing in Angstroms.
+    patch_size: tuple[int, int]
+        Size of the patches to extract (ph, pw) in terms of pixels.
+    deformation_field_resolution: tuple[int, int, int]
+        Resolution of the deformation field (nt, nh, nw) where nt is the number of
+        time points, nh is the number of control points in height, and nw is the
+        number of control points in width.
+    initial_deformation_field: torch.Tensor | None
+        Initial deformation field to start from with shape (2, nt, nh, nw) where 2
+        corresponds to (y, x) shifts. If None, initializes to zero shifts.
+    device: torch.device, optional
+        Device to perform computation on. If None, uses the device of the input image.
+    n_iterations: int
+        Number of iterations for the optimization process. Default is 100.
     """
     device = device if device is not None else image.device
     image = image.to(device)
@@ -325,72 +571,129 @@ def estimate_motion_new(
     # Normalize image based on stats from central 50% of image
     image = normalize_image(image)
 
+    # Initialize a deformation field using pre-existing data, if provided
+    if initial_deformation_field is None:
+        initial_deformation_field = torch.zeros(
+            (2, *deformation_field_resolution),
+            device="cpu",  # NOTE: resample_deformation_field needs to support device before making on CUDA device
+        )
+
+    deformation_field = CubicCatmullRomGrid3d(
+        resolution=deformation_field_resolution, n_channels=2
+    ).to(device)
+
+    # # TODO: Resupport initialization
+    # deformation_field_data = resample_deformation_field(
+    #     deformation_field=initial_deformation_field,
+    #     target_resolution=deformation_field_resolution,
+    # )
+    # deformation_field_data = deformation_field_data.to(device)
+    # deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data)
+    # deformation_field = deformation_field.to(device)
+
+    # ### DEBUGGING
+    # print("DEBUGGING: deformation_field_data.shape", deformation_field_data.shape)
+
     # Create the patch grid
     patch_positions = patch_grid_centers(
         image_shape=(t, h, w),
         patch_shape=(1, *patch_size),
-        patch_step=(1, patch_size[0] // 2, patch_size[1] // 2),  # Default 50%
+        patch_step=(1, patch_size[0] // 2, patch_size[1] // 2),  # Default 50% overlap
         distribute_patches=True,
         device=device,
     )  # (t, gh, gw, 3)
-    print("patch_positions.shape", patch_positions.shape)
+
+    ### DEBUGGING
+    print("DEBUGGING: patch_positions.shape", patch_positions.shape)
+
     gh, gw = patch_positions.shape[1:3]
 
+    # Reusable masks and Fourier filters
+    # NOTE: This is assuming square patches... revisit if needed
+    # NOTE: Circle mask is quite small compared to patch size,
+    # @jdickerson95 @alisterburt should this be the case?
+    circle_mask = circle(
+        radius=patch_size[1] / 4,
+        image_shape=patch_size,
+        smoothing_radius=patch_size[1] / 8,
+        device=device,
+    )
 
-    # TODO: Include other image pre-processing setups
+    b_factor_envelope = b_envelope(
+        B=b_factor,
+        image_shape=patch_size,
+        pixel_size=pixel_spacing,
+        rfft=True,
+        fftshift=False,
+        device=device,
+    )
 
+    # Instantiate the patch iterator (mini-batch like data-loader)
     image_patch_iterator = ImagePatchIterator(
         image=image,
-        image_shape=(t, h, w),
         patch_size=patch_size,
         control_points=patch_positions,
     )
 
-    # Initialize deformation field
-    deformation_field = CubicCatmullRomGrid3d(
-        resolution=deformation_field_resolution, n_channels=2
+    motion_optimizer = _setup_optimizer(
+        optimizer_type=optimizer_type,
+        parameters=deformation_field.parameters(),
+        **(optimizer_kwargs if optimizer_kwargs is not None else {}),
     )
-    deformation_field.to(device)
 
-    # TODO: Optimizer setup
-
+    # "Training" loop going over all patched n_iterations times
     for iter_idx in range(n_iterations):
+        patch_iter = image_patch_iterator.get_iterator(batch_size=8)  # TODO: expose
 
-        ### DEBUGGING: Print iteration info
-        print("iter_idx", iter_idx)
-        
-        patch_iter = image_patch_iterator.get_iterator(batch_size=8)
-        
-        for (patch_subset, patch_subset_centers) in patch_iter:
+        for patch_subset, patch_subset_centers in patch_iter:
             # patch_subset: (b, t, ph, pw)
             # positions_subset: (b, t, 3)
 
-            patch_subset = patch_subset * mask  # TODO re-define mask
+            patch_subset = patch_subset * circle_mask
             patch_subset = torch.fft.rfftn(patch_subset, dim=(-2, -1))
-            
+
             # Use mean of all patches (for each batch)
-            reference_patches = torch.mean(patch_subset, dim=1)  # (b, ph, pw)
-            print("reference_patches.shape", reference_patches.shape)
-            
-            # Predict the shifts at patch centers
-            predicted_shifts = -1 * deformation_field(patch_subset_centers)
-            print("predicted_shifts.shape", predicted_shifts.shape)
-            
-            # Shift the patches by the predicted shifts
-            predicted_shifts_px = predicted_shifts  # NOTE: check for angstrom scaling
-            shifted_patches = fourier_shift_dft_2d(
-                dft=patch_subset,
-                image_shape=patch_size,
-                shifts=predicted_shifts_px,
-                rfft=True,
-                fftshifted=False,
+            reference_patches = torch.mean(patch_subset, dim=1, keepdim=True)
+            # print("reference_patches.shape", reference_patches.shape)
+
+            # Predict the shifts based on the deformation field and apply those
+            # shifts to the patches. Shifted patches are use to compute loss relative
+            # to the mean of the patches in the batch.
+            shifted_patches, predicted_shifts = _compute_forward_pass(
+                deformation_field=deformation_field,
+                patch_subset=patch_subset,
+                batch_subset_centers=patch_subset_centers,
+                ph=patch_size[0],
+                pw=patch_size[1],
+                b_factor_envelope=b_factor_envelope,
+                bandpass=None,  # TODO: add bandpass filter
             )
-            print("shifted_patches.shape", shifted_patches.shape)
+
+            # Optimizer step
+            if optimizer_type.lower() == "adam":
+                loss = _optimizer_step_adam(
+                    motion_optimizer=motion_optimizer,
+                    shifted_patches=shifted_patches,
+                    reference_patches=reference_patches,
+                )
+            elif optimizer_type.lower() == "lbfgs":
+                loss = _optimizer_step_lbfgs(
+                    motion_optimizer=motion_optimizer,
+                    deformation_field=deformation_field,
+                    patch_subset=patch_subset,
+                    patch_subset_centers=patch_subset_centers,
+                    patch_shape=patch_size,
+                    b_factor_envelope=b_factor_envelope,
+                    bandpass=None,  # TODO: add bandpass filter
+                )
             
-            # TODO: bandpass filter and B-factor envelope
-            
-            # TODO: optimizer step
-            
+        print("DEBUGGING: finished with this epoch")
+
+        # Log loss every 10 iterations
+        # TODO: Some more robust logging or optimization tracking mechanism?
+        if iter_idx % 10 == 0:
+            print(f"Iter {iter_idx}, Loss: {loss:.6f}")
+
     # Return final deformation field
     # QUESTION: Why are these commented out?
     # average_shift = torch.mean(deformation_field.data)
@@ -437,15 +740,16 @@ def estimate_motion_lazy(
     # semantics: resample existing to target resolution or initialize as all zeros
     if initial_deformation_field is None:
         deformation_field = CubicCatmullRomGrid3d(
-            resolution=deformation_field_resolution,
-            n_channels=2
+            resolution=deformation_field_resolution, n_channels=2
         ).to(device)
     else:
         deformation_field_data = resample_deformation_field(
             deformation_field=initial_deformation_field,
             target_resolution=(nt, nh, nw),
         )
-        deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
+        deformation_field = CubicCatmullRomGrid3d.from_grid_data(
+            deformation_field_data
+        ).to(device)
 
     # normalize image based on stats from central 50% of image
     image = normalize_image(image)
@@ -497,12 +801,12 @@ def estimate_motion_lazy(
 
     # Initialize optimizer
     if optimizer.lower() == "adam":
-        motion_optimiser = torch.optim.Adam(
+        motion_optimizer = torch.optim.Adam(
             params=deformation_field.parameters(),
             lr=learning_rate,
         )
     elif optimizer.lower() == "lbfgs":
-        motion_optimiser = torch.optim.LBFGS(
+        motion_optimizer = torch.optim.LBFGS(
             params=deformation_field.parameters(),
             lr=learning_rate,
             line_search_fn="strong_wolfe",
@@ -550,7 +854,7 @@ def estimate_motion_lazy(
             patch_shape=(ph, pw),
             pixel_spacing=pixel_spacing,
             # refinement_fraction=i / (n_iterations - 1),
-            device=device
+            device=device,
         )
 
         patch_subset = patch_subset * bandpass * b_factor_envelope
@@ -574,13 +878,13 @@ def estimate_motion_lazy(
         if optimizer.lower() == "adam":
             # Calculate loss
             loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
-            motion_optimiser.zero_grad()
+            motion_optimizer.zero_grad()
             loss.backward()
-            motion_optimiser.step()
+            motion_optimizer.step()
         elif optimizer.lower() == "lbfgs":
 
             def closure():
-                motion_optimiser.zero_grad()
+                motion_optimizer.zero_grad()
                 # Recompute forward pass in closure for L-BFGS
                 pred_shifts = -1 * deformation_field(patch_subset_centers)
                 pred_shifts_px = pred_shifts
@@ -600,7 +904,7 @@ def estimate_motion_lazy(
                 loss.backward()
                 return loss
 
-            loss = motion_optimiser.step(closure)
+            loss = motion_optimizer.step(closure)
             # Extract loss value for logging
             if isinstance(loss, torch.Tensor):
                 loss = loss.item()

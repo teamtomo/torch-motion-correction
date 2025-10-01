@@ -9,7 +9,7 @@ except PackageNotFoundError:
 __author__ = "Alister Burt"
 __email__ = "alisterburt@gmail.com"
 
-from torch_motion_correction.estimate_local_motion import estimate_motion, estimate_local_motion
+from torch_motion_correction.estimate_local_motion import estimate_motion_new
 from torch_motion_correction.correct_motion import (
     correct_motion, 
     correct_motion_batched, 
