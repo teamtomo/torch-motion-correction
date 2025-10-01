@@ -357,7 +357,7 @@ def estimate_motion_cross_correlation_patches(
             )
         
         # Add shifts to existing deformation field (cumulative motion correction)
-        deformation_field[0, frame_idx, :, :] += shift_y
+        deformation_field[0, frame_idx, :, :] += shift_y  # subtract shift for deformation field
         deformation_field[1, frame_idx, :, :] += shift_x
 
     # Apply temporal smoothing if enabled
@@ -581,6 +581,7 @@ def _create_deformation_field_from_whole_image_shifts(
     t, h, w = image_shape
     
     # Create deformation field with constant shifts per frame
+    #deformation_field = -1 * einops.rearrange(shifts, 't c -> c t 1 1')
     deformation_field = einops.rearrange(shifts, 't c -> c t 1 1')
     
     return deformation_field

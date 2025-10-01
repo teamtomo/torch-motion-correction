@@ -53,6 +53,7 @@ def resample_deformation_field(
     tyx = einops.rearrange([tt, yy, xx], "tyx nt nh nw -> nt nh nw tyx")
 
     # evaluate existing field at new field grid points
-    new_deformation_field = evaluate_deformation_field(deformation_field, tyx=tyx)
+    new_deformation_field = evaluate_deformation_field(deformation_field, tyx=tyx.to(deformation_field.device))
 
+    new_deformation_field = einops.rearrange(new_deformation_field, "nt nh nw tyx -> tyx nt nh nw")
     return new_deformation_field

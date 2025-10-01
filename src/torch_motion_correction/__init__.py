@@ -14,6 +14,7 @@ from torch_motion_correction.correct_motion import (
     correct_motion, 
     correct_motion_batched, 
     correct_motion_fast,
+    correct_motion_slow,
 )
 from torch_motion_correction.evaluate_deformation_field import (
     evaluate_deformation_field,
@@ -35,6 +36,7 @@ __all__ = [
     "correct_motion",
     "correct_motion_batched",
     "correct_motion_fast",
+    "correct_motion_slow",
     "evaluate_deformation_field",
     "estimate_motion_cross_correlation_whole_image",
     "estimate_motion_cross_correlation_patches",
