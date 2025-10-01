@@ -452,11 +452,6 @@ def _compute_forward_pass(
     """
     predicted_shifts = -1 * deformation_field(batch_subset_centers)
 
-    # ### DEBUGGING
-    # print("DEBUGGING: predicted_shifts.shape", predicted_shifts.shape)
-    # print("DEBUGGING: patch_subset.shape", patch_subset.shape)
-    # print("DEBUGGING: batch_subset_centers.shape", batch_subset_centers.shape)
-
     # Shift the patches by the predicted shifts
     shifted_patches = fourier_shift_dft_2d(
         dft=patch_subset,
@@ -591,9 +586,6 @@ def estimate_motion_new(
     # deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data)
     # deformation_field = deformation_field.to(device)
 
-    # ### DEBUGGING
-    # print("DEBUGGING: deformation_field_data.shape", deformation_field_data.shape)
-
     # Create the patch grid
     patch_positions = patch_grid_centers(
         image_shape=(t, h, w),
@@ -602,9 +594,6 @@ def estimate_motion_new(
         distribute_patches=True,
         device=device,
     )  # (t, gh, gw, 3)
-
-    ### DEBUGGING
-    print("DEBUGGING: patch_positions.shape", patch_positions.shape)
 
     gh, gw = patch_positions.shape[1:3]
 
@@ -686,13 +675,11 @@ def estimate_motion_new(
                     b_factor_envelope=b_factor_envelope,
                     bandpass=None,  # TODO: add bandpass filter
                 )
-            
-        print("DEBUGGING: finished with this epoch")
 
         # Log loss every 10 iterations
         # TODO: Some more robust logging or optimization tracking mechanism?
         if iter_idx % 10 == 0:
-            print(f"Iter {iter_idx}, Loss: {loss:.6f}")
+            print(f"Iter {iter_idx} / {n_iterations}, Loss: {loss:.6f}")
 
     # Return final deformation field
     # QUESTION: Why are these commented out?
