@@ -683,7 +683,7 @@ def estimate_motion_new(
 
     # Return final deformation field
     # QUESTION: Why are these commented out?
-    # average_shift = torch.mean(deformation_field.data)
+    average_shift = torch.mean(deformation_field.data)
     # final_deformation_field = deformation_field.data - average_shift
     final_deformation_field = deformation_field.data - average_shift
     return final_deformation_field
