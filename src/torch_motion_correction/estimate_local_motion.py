@@ -123,9 +123,9 @@ class ImagePatchIterator:
             f"y: [{min_y}, {max_y}], x: [{min_x}, {max_x}]"
         )
         assert min_y - ph // 2 >= 0, err_msg
-        assert max_y + ph // 2 < H, err_msg
+        assert max_y + ph // 2 <= H, err_msg
         assert min_x - pw // 2 >= 0, err_msg
-        assert max_x + pw // 2 < W, err_msg
+        assert max_x + pw // 2 <= W, err_msg
 
     def get_iterator(
         self, batch_size: int = 1, randomized: bool = True
@@ -739,6 +739,14 @@ def estimate_motion_new(
         fftshift=False,
         device=device,
     )
+    
+    bandpass_filter = prepare_bandpass_filter(
+        frequency_range=frequency_range,
+        patch_shape=patch_size,
+        pixel_spacing=pixel_spacing,
+        refinement_fraction=1.0,  # Not used in this context
+        device=device,
+    )
 
     # Instantiate the patch iterator (mini-batch like data-loader)
     image_patch_iterator = ImagePatchIterator(
@@ -781,7 +789,7 @@ def estimate_motion_new(
                 ph=patch_size[0],
                 pw=patch_size[1],
                 b_factor_envelope=b_factor_envelope,
-                bandpass=None,  # TODO: add bandpass filter
+                bandpass=bandpass_filter,
             )
 
             # Use gradient accumulation to optimize over all patches simultaneously
