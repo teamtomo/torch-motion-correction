@@ -22,12 +22,12 @@ def estimate_local_motion(
     image: torch.Tensor,  # (t, h, w)
     pixel_spacing: float,  # angstroms
     deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
-    initial_deformation_field: torch.Tensor,  # (yx, nt, nh, nw)
+    initial_deformation_field: torch.Tensor | None = None,  # (yx, nt, nh, nw)
     b_factor: float = 500,
     frequency_range: tuple[float, float] = (300, 10),  # angstroms e.g. (300, 15)
     patch_sidelength: int = 512,
     n_iterations: int = 200,
-    n_patches_per_batch: int = 20,
+    n_patches_per_batch: int = 10,
     learning_rate: float = 0.05,
     optimizer: str = 'adam',  # 'adam' or 'lbfgs'
     device: torch.device = None,
@@ -47,13 +47,10 @@ def estimate_local_motion(
     else:
         image = image.to(device)
 
-    if initial_deformation_field is not None:
-        initial_deformation_field = initial_deformation_field.to(device)
-
     # grab image and deformation field dims
     t, h, w = image.shape
     nt, nh, nw = deformation_field_resolution
-    
+
     # initialize deformation field
     # semantics: resample existing to target resolution or initialize as all zeros
     print(f"Initial deformation field: {initial_deformation_field}")
@@ -63,19 +60,20 @@ def estimate_local_motion(
         n_channels=2
     ).to(device)
 
-    if initial_deformation_field is not None:
+    if initial_deformation_field is None:
+        deformation_field_data = torch.zeros(size=(2, *deformation_field_resolution), device=device)
+    elif initial_deformation_field is not None:
         deformation_field_data = resample_deformation_field(
             deformation_field=initial_deformation_field,
             target_resolution=(nt, nh, nw),
         )
         deformation_field_data -= torch.mean(deformation_field_data)
-        #deformation_field_data *= -1
+        # deformation_field_data *= -1
         print(f"Resampled initial deformation field to {deformation_field_data.shape}")
-        deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
-        
+    deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
 
-    #print(f"Deformation field: {deformation_field}")
-    
+    # print(f"Deformation field: {deformation_field}")
+
     # normalize image based on stats from central 50% of image
     image = normalize_image(image)
 
@@ -117,10 +115,7 @@ def estimate_local_motion(
     )
 
     # Normalize patch center positions to [0, 1]
-    if len(data_patch_positions.shape) == 3:  # 2D case: (gh, gw, 2)  
-        data_patch_positions = data_patch_positions / torch.tensor([t - 1, h - 1, w - 1], device=device)
-    else:  # 3D case: (gd, gh, gw, 3)
-        data_patch_positions = data_patch_positions / torch.tensor([t - 1, h - 1, w - 1], device=device)
+    data_patch_positions = data_patch_positions / torch.tensor([t - 1, h - 1, w - 1], device=device)
 
     # Initialize optimizer
     if optimizer.lower() == 'adam':
@@ -137,18 +132,22 @@ def estimate_local_motion(
     else:
         raise ValueError(f"Unsupported optimizer: {optimizer}. Choose 'adam' or 'lbfgs'.")
 
+    # Generate patch indices ONCE before loop - same subset every iteration
+    patch_subset_idx = np.random.randint(
+        low=(0, 0), high=(gh, gw), size=(n_patches_per_batch, 2)
+    )
+    idx_gh, idx_gw = einops.rearrange(patch_subset_idx, 'b idx -> idx b')
+
+    # Storage for visualization: reference and shifted patches at each iteration
+    stored_reference_patches = []
+    stored_shifted_patches = []
+
     # Training loop using lazy patch extraction
     for i in range(n_iterations):
-        # Generate random patch indices to match non-lazy behavior
-        patch_subset_idx = np.random.randint(
-            low=(0, 0), high=(gh, gw), size=(n_patches_per_batch, 2)
-        )
-        idx_gh, idx_gw = einops.rearrange(patch_subset_idx, 'b idx -> idx b')
-
-        # Extract patches at the selected indices
+        # Extract patches at the SAME selected indices every iteration
         patch_subset, patch_positions = lazy_patch_grid.get_patches_at_indices(idx_gh, idx_gw)
 
-        # Reshape from (..., 1, ph, pw) to (..., ph, pw) 
+        # Reshape from (..., 1, ph, pw) to (..., ph, pw)
         if len(patch_subset.shape) == 5:  # (t, n_patches, 1, ph, pw)
             patch_subset = einops.rearrange(patch_subset, 't n 1 ph pw -> t n ph pw')
         elif len(patch_subset.shape) == 4:  # (n_patches, t, 1, ph, pw) - transpose needed
@@ -157,10 +156,6 @@ def estimate_local_motion(
         # Apply mask and FFT
         patch_subset = patch_subset * mask
         patch_subset = torch.fft.rfftn(patch_subset, dim=(-2, -1))
-
-        # Use the middle frame as the reference patch
-        # middle_frame = patch_subset.shape[0] // 2
-        reference_patches = torch.mean(patch_subset, dim=0)
 
         # Get patch centers for the selected patches (matching non-lazy version)
         patch_subset_centers = data_patch_positions[:, idx_gh, idx_gw]
@@ -177,7 +172,12 @@ def estimate_local_motion(
         patch_subset = patch_subset * bandpass * b_factor_envelope
 
         # Predict shifts at patch centers
-        predicted_shifts = -1 * (new_deformation_field(patch_subset_centers) + deformation_field(patch_subset_centers))
+        # deformation field is shifts of sample
+        # shift by negative that to 'undo' the deformation
+        predicted_shifts = -1 * (
+            new_deformation_field(patch_subset_centers)
+            + deformation_field(patch_subset_centers)
+        )
 
         # Shift patches by predicted shifts
         predicted_shifts_px = predicted_shifts
@@ -187,7 +187,16 @@ def estimate_local_motion(
             shifts=predicted_shifts_px,
             rfft=True,
             fftshifted=False,
-        )
+        )  # (b, t, ph, pw)
+        reference_patches = torch.mean(shifted_patches, dim=0, keepdim=True)
+
+        # Store patches for visualization every 20 iterations (convert back to real space)
+        if i % 20 == 0:
+            with torch.no_grad():
+                shifted_real = torch.fft.irfftn(shifted_patches, dim=(-2, -1))
+                reference_real = torch.fft.irfftn(reference_patches, dim=(-2, -1))
+                stored_shifted_patches.append(shifted_real.cpu())
+                stored_reference_patches.append(reference_real.cpu())
 
         # shifted_patches = shifted_patches * bandpass * b_factor_envelope
 
@@ -198,54 +207,47 @@ def estimate_local_motion(
             motion_optimiser.zero_grad()
             loss.backward()
             motion_optimiser.step()
-        elif optimizer.lower() == 'lbfgs':
-            def closure():
-                motion_optimiser.zero_grad()
-                # Recompute forward pass in closure for L-BFGS
-                pred_shifts = -1 * (new_deformation_field(patch_subset_centers))
-                pred_shifts = pred_shifts + (-1*deformation_field.data)
-                #pred_shifts = deformation_field(patch_subset_centers)
-                pred_shifts_px = pred_shifts
-                shift_patches = fourier_shift_dft_2d(
-                    dft=patch_subset,
-                    image_shape=(ph, pw),
-                    shifts=pred_shifts_px,
-                    rfft=True,
-                    fftshifted=False,
-                )
-                shift_patches = shift_patches * bandpass * b_factor_envelope
-                # Use same stable reference in closure
-                reference_patches_closure = torch.mean(patch_subset, dim=0)
-                loss = torch.mean((shift_patches - reference_patches_closure).abs() ** 2)
-                loss.backward()
-                return loss
-
-            loss = motion_optimiser.step(closure)
-            # Extract loss value for logging
-            if isinstance(loss, torch.Tensor):
-                loss = loss.item()
-            else:
-                loss = float(loss) if loss is not None else 0.0
 
         # Progress logging
-        if i % 10 == 0:
+        if i % 1 == 0:
             if isinstance(loss, torch.Tensor):
                 print(f"{i}: loss = {loss.item():.6f}")
             else:
                 print(f"{i}: loss = {loss:.6f}")
-    
-    
+
     print("new_deformation_field: min = {:.4f}, max = {:.4f}".format(
-        new_deformation_field.data.min().item(), new_deformation_field.data.max().item()))
+        new_deformation_field.data.min().item(), new_deformation_field.data.max().item()
+    )
+    )
     print("deformation_field: min = {:.4f}, max = {:.4f}".format(
-        deformation_field.data.min().item(), deformation_field.data.max().item()))
+        deformation_field.data.min().item(), deformation_field.data.max().item()
+    )
+    )
     # Return final deformation field
     final_deformation_field = new_deformation_field.data + deformation_field.data
     average_shift = torch.mean(final_deformation_field.data)
     final_deformation_field = final_deformation_field.data - average_shift
 
-    #average_shift = torch.mean(initial_deformation_field.data)
-    #final_deformation_field = initial_deformation_field.data - average_shift
-    
+    # average_shift = torch.mean(initial_deformation_field.data)
+    # final_deformation_field = initial_deformation_field.data - average_shift
+
+    # Visualize stored patches with napari
+    import napari
+
+    # Convert lists of tensors to numpy arrays
+    # Stack along new dimension for iterations: (n_iterations, t, n_patches, ph, pw)
+    shifted_patches = np.stack([p.numpy() for p in stored_shifted_patches], axis=0)
+    reference_patches = np.stack([p.numpy() for p in stored_reference_patches], axis=0)
+
+    reference_patches = einops.repeat(reference_patches, "o 1 np ph pw -> o t np ph pw", t=len(image))
+
+    shifted_patches = einops.rearrange(shifted_patches, 'o t np ph pw -> o t (np ph) pw')
+    reference_patches = einops.rearrange(reference_patches, 'o t np ph pw -> o t (np ph) pw')
+
+    viewer = napari.Viewer()
+    viewer.add_image(shifted_patches, name='shifted_patches', colormap='gray')
+    viewer.add_image(reference_patches, name='reference_patches', colormap='gray')
+    napari.run()
+
     return final_deformation_field
-    #return initial_deformation_field
+    # return initial_deformation_field

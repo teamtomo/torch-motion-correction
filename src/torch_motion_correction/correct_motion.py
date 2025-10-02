@@ -14,7 +14,7 @@ from torch_image_interpolation.grid_sample_utils import array_to_grid_sample
 
 def correct_motion(
     image: torch.Tensor,  # (t, h, w)
-    deformation_grid: torch.Tensor,  # (yx, t, h, w)
+    deformation_field: torch.Tensor,  # (yx, t, h, w)
     grad: bool = False,
     device: torch.device = None,
 ) -> torch.Tensor:
@@ -22,10 +22,10 @@ def correct_motion(
         device = image.device
     else:
         image = image.to(device)
-        deformation_grid = deformation_grid.to(device)
+        deformation_field = deformation_field.to(device)
 
     t, _, _ = image.shape
-    _, gt, gh, gw = deformation_grid.shape
+    _, gt, gh, gw = deformation_field.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
 
     # Use conditional gradient context to save memory
@@ -37,7 +37,7 @@ def correct_motion(
             _correct_frame(
                 frame=frame,
                 frame_deformation_grid=evaluate_deformation_field_at_t(
-                    deformation_field=deformation_grid,
+                    deformation_field=deformation_field,
                     t=frame_t,
                     grid_shape=(10 * gh, 10 * gw)
                 )
@@ -68,7 +68,7 @@ def _correct_frame(
     deformation_grid_dim_lengths = torch.as_tensor([gh - 1, gw - 1], device=frame.device, dtype=torch.float32)
     normalized_pixel_grid = pixel_grid / image_dim_lengths
     deformation_grid_interpolants = normalized_pixel_grid * deformation_grid_dim_lengths
-    deformation_grid_interpolants = array_to_grid_sample(deformation_grid_interpolants, array_shape=(h, w)) # (h, w, xy)
+    deformation_grid_interpolants = array_to_grid_sample(deformation_grid_interpolants, array_shape=(gh, gw)) # (h, w, xy)
     pixel_shifts = F.grid_sample(
         input=einops.rearrange(frame_deformation_grid, 'yx h w -> 1 yx h w'),
         grid=einops.rearrange(deformation_grid_interpolants, 'h w xy -> 1 h w xy'),
@@ -94,7 +94,7 @@ def _correct_frame(
 
 def correct_motion_slow(
     image: torch.Tensor,
-    deformation_grid: torch.Tensor,
+    deformation_field: torch.Tensor,
     grad: bool = False,
     device: torch.device = None,
 ) -> torch.Tensor:
@@ -102,12 +102,11 @@ def correct_motion_slow(
         device = image.device
     else:
         image = image.to(device)
-        deformation_grid = deformation_grid.to(device)
+        deformation_field = deformation_field.to(device)
         
     t, _, _ = image.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
-    
-        
+
     # Use conditional gradient context to save memory
     gradient_context = torch.enable_grad() if grad else torch.no_grad()
     
@@ -116,7 +115,7 @@ def correct_motion_slow(
         corrected_frames = [
             _correct_frame_slow(
                 frame=frame,
-                deformation_grid=deformation_grid,
+                deformation_grid=deformation_field,
                 t=frame_t,
             )
             for frame, frame_t

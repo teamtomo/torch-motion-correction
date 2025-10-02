@@ -234,7 +234,7 @@ def estimate_motion_cross_correlation_patches(
             print("Applying full deformation field using correct_motion")
             image = correct_motion(
                 image=image,
-                deformation_grid=deformation_field,
+                deformation_field=deformation_field,
                 device=device
             )
     # Split into patch grid size patches with 50% overlap
