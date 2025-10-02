@@ -68,7 +68,7 @@ def _correct_frame(
     deformation_grid_dim_lengths = torch.as_tensor([gh - 1, gw - 1], device=frame.device, dtype=torch.float32)
     normalized_pixel_grid = pixel_grid / image_dim_lengths
     deformation_grid_interpolants = normalized_pixel_grid * deformation_grid_dim_lengths
-    deformation_grid_interpolants = array_to_grid_sample(deformation_grid_interpolants, array_shape=(h, w)) # (h, w, xy)
+    deformation_grid_interpolants = array_to_grid_sample(deformation_grid_interpolants, array_shape=(gh, gw)) # (gh, gw, xy)
     pixel_shifts = F.grid_sample(
         input=einops.rearrange(frame_deformation_grid, 'yx h w -> 1 yx h w'),
         grid=einops.rearrange(deformation_grid_interpolants, 'h w xy -> 1 h w xy'),
