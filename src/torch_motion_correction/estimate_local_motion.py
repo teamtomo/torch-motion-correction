@@ -479,6 +479,9 @@ def _setup_optimizer(
             weight_decay=weight_decay,
             amsgrad=amsgrad,
         )
+    elif optimizer_type.lower() == "sgd":
+        lr = kwargs.get("lr", 0.01)
+        return torch.optim.SGD(params=parameters, lr=lr)
     elif optimizer_type.lower() == "lbfgs":
         lr = kwargs.get("lr", 1)
         max_iter = kwargs.get("max_iter", 20)
@@ -564,56 +567,56 @@ def _compute_forward_pass(
     return shifted_patches, predicted_shifts
 
 
-def _optimizer_step_adam(
-    motion_optimizer: torch.optim.Adam,
-    shifted_patches: torch.Tensor,
-    reference_patches: torch.Tensor,
-) -> float:
-    """Optimizer step for Adam optimizer."""
-    # Using squared difference for loss
-    loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
-    motion_optimizer.zero_grad()
-    loss.backward()
-    motion_optimizer.step()
+# def _optimizer_step_adam(
+#     motion_optimizer: torch.optim.Adam,
+#     shifted_patches: torch.Tensor,
+#     reference_patches: torch.Tensor,
+# ) -> float:
+#     """Optimizer step for Adam optimizer."""
+#     # Using squared difference for loss
+#     loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
+#     motion_optimizer.zero_grad()
+#     loss.backward()
+#     motion_optimizer.step()
 
-    return loss.item()
+#     return loss.item()
 
 
-def _optimizer_step_lbfgs(
-    motion_optimizer: torch.optim.LBFGS,
-    deformation_field: CubicCatmullRomGrid3d,
-    patch_subset: torch.Tensor,
-    patch_subset_centers: torch.Tensor,
-    patch_shape: tuple[int, int],
-    bandpass: torch.Tensor | None,
-    b_factor_envelope: torch.Tensor | None,
-) -> float:
-    """Optimizer step for L-BFGS optimizer."""
+# def _optimizer_step_lbfgs(
+#     motion_optimizer: torch.optim.LBFGS,
+#     deformation_field: CubicCatmullRomGrid3d,
+#     patch_subset: torch.Tensor,
+#     patch_subset_centers: torch.Tensor,
+#     patch_shape: tuple[int, int],
+#     bandpass: torch.Tensor | None,
+#     b_factor_envelope: torch.Tensor | None,
+# ) -> float:
+#     """Optimizer step for L-BFGS optimizer."""
 
-    def closure():
-        motion_optimizer.zero_grad()
-        # Recompute forward pass in closure for L-BFGS
-        shift_patches, _ = _compute_forward_pass(
-            deformation_field=deformation_field,
-            patch_subset=patch_subset,
-            batch_subset_centers=patch_subset_centers,
-            ph=patch_shape[0],
-            pw=patch_shape[1],
-            b_factor_envelope=b_factor_envelope,
-            bandpass=bandpass,
-        )
-        # Use same stable reference in closure
-        reference_patches_closure = torch.mean(patch_subset, dim=0)
-        loss = torch.mean((shift_patches - reference_patches_closure).abs() ** 2)
-        loss.backward()
-        return loss
+#     def closure():
+#         motion_optimizer.zero_grad()
+#         # Recompute forward pass in closure for L-BFGS
+#         shift_patches, _ = _compute_forward_pass(
+#             deformation_field=deformation_field,
+#             patch_subset=patch_subset,
+#             batch_subset_centers=patch_subset_centers,
+#             ph=patch_shape[0],
+#             pw=patch_shape[1],
+#             b_factor_envelope=b_factor_envelope,
+#             bandpass=bandpass,
+#         )
+#         # Use same stable reference in closure
+#         reference_patches_closure = torch.mean(patch_subset, dim=0)
+#         loss = torch.mean((shift_patches - reference_patches_closure).abs() ** 2)
+#         loss.backward()
+#         return loss
 
-    loss = motion_optimizer.step(closure)
-    # Extract loss value for logging
-    if isinstance(loss, torch.Tensor):
-        return loss.item()
-    else:
-        return float(loss) if loss is not None else 0.0
+#     loss = motion_optimizer.step(closure)
+#     # Extract loss value for logging
+#     if isinstance(loss, torch.Tensor):
+#         return loss.item()
+#     else:
+#         return float(loss) if loss is not None else 0.0
 
 
 def estimate_motion_new(
@@ -781,26 +784,35 @@ def estimate_motion_new(
                 bandpass=None,  # TODO: add bandpass filter
             )
 
-            # Optimizer step
-            if optimizer_type.lower() == "adam":
-                loss = _optimizer_step_adam(
-                    motion_optimizer=motion_optimizer,
-                    shifted_patches=shifted_patches,
-                    reference_patches=reference_patches,
-                )
-            elif optimizer_type.lower() == "lbfgs":
-                loss = _optimizer_step_lbfgs(
-                    motion_optimizer=motion_optimizer,
-                    deformation_field=deformation_field,
-                    patch_subset=patch_subset,
-                    patch_subset_centers=patch_subset_centers,
-                    patch_shape=patch_size,
-                    b_factor_envelope=b_factor_envelope,
-                    bandpass=None,  # TODO: add bandpass filter
-                )
+            # Use gradient accumulation to optimize over all patches simultaneously
+            loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
+            loss.backward()
+            loss_value = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
 
-            total_loss += loss
+            # # Optimizer step
+            # if optimizer_type.lower() == "adam":
+            #     loss = _optimizer_step_adam(
+            #         motion_optimizer=motion_optimizer,
+            #         shifted_patches=shifted_patches,
+            #         reference_patches=reference_patches,
+            #     )
+            # elif optimizer_type.lower() == "lbfgs":
+            #     loss = _optimizer_step_lbfgs(
+            #         motion_optimizer=motion_optimizer,
+            #         deformation_field=deformation_field,
+            #         patch_subset=patch_subset,
+            #         patch_subset_centers=patch_subset_centers,
+            #         patch_shape=patch_size,
+            #         b_factor_envelope=b_factor_envelope,
+            #         bandpass=None,  # TODO: add bandpass filter
+            #     )
+
+            total_loss += loss_value
             n_batches += 1
+
+        # Outside of patch subset loop, do the optimizer step once per iteration
+        motion_optimizer.step()
+        motion_optimizer.zero_grad()
 
         # update tqdm with current running average loss for this iteration
         current_avg_loss = total_loss / n_batches if n_batches > 0 else 0.0
