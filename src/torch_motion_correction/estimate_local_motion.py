@@ -2,6 +2,7 @@ from datetime import datetime
 import random
 from typing import Iterator
 
+import tqdm
 import einops
 import numpy as np
 import torch
@@ -158,22 +159,23 @@ class ImagePatchIterator:
 
             # NOTE: This is currently assuming control points are constant over time
             _control_points = self.control_points[0].reshape(-1, 3)  # (gh * gw, 3)
-            _control_points_normalized = self.control_points_normalized[0].reshape(
-                -1, 3
-            )
+            # _control_points_norm = self.control_points_normalized[0].reshape(-1, 3)  # (t, gh * gw, 3)
+            _control_points_norm = self.control_points_normalized.reshape(
+                t, -1, 3
+            )  # (t, gh * gw, 3)
 
             # Apply randomization if requested
             indices = list(range(gh * gw))
             if randomized:
                 random.shuffle(indices)
                 _control_points = _control_points[indices]
-                _control_points_normalized = _control_points_normalized[indices]
+                _control_points_norm = _control_points_norm[:, indices]
 
             for i in range(0, gh * gw, batch_size):
                 batch_control_points = _control_points[i : i + batch_size]  # (b, 3)
-                batch_control_points_normalized = _control_points_normalized[
-                    i : i + batch_size
-                ]
+                batch_control_points_norm = _control_points_norm[
+                    :, i : i + batch_size
+                ]  # (b, t, 3)
 
                 # Use actual control points to extract patches from the image
                 patches = []
@@ -191,14 +193,104 @@ class ImagePatchIterator:
 
                 patches = torch.stack(patches)  # (b, t, ph, pw)
 
-                # Expand to include all time points for each batch element
-                batch_control_points_all_times = (
-                    batch_control_points_normalized.unsqueeze(1).expand(-1, t, -1)
-                )
-
-                yield patches, batch_control_points_all_times  # (b, t, 3)
+                yield patches, batch_control_points_norm
 
         return inner_iterator()
+
+
+class OptimizationCheckpoint:
+    """Dataclass for storing single optimization stage (deformation field + loss).
+
+    Parameters
+    ----------
+    deformation_field : torch.Tensor
+        The deformation field at this checkpoint with shape (2, nt, nh, nw) where
+        2 corresponds to (y, x) shifts.
+    loss : float
+        The loss value at this checkpoint.
+    step : int
+        The optimization step number at this checkpoint.
+
+    Methods
+    -------
+    as_dict() -> dict
+        Returns a dictionary representation of the checkpoint.
+    """
+
+    deformation_field: torch.Tensor  # (yx, nt, nh, nw)
+    loss: float
+    step: int
+
+    def __init__(self, deformation_field: torch.Tensor, loss: float, step: int):
+        self.deformation_field = deformation_field.cpu()
+        self.loss = loss
+        self.step = step
+
+    def as_dict(self) -> dict:
+        return {
+            "deformation_field": self.deformation_field.tolist(),
+            "loss": self.loss,
+            "step": self.step,
+        }
+
+
+class OptimizationTrajectory:
+    """Dataclass for storing and tracking motion correction optimization trajectory.
+
+    Parameters
+    ----------
+    optimization_checkpoints : list[OptimizationCheckpoint]
+        List of optimization checkpoints recorded during the optimization process.
+    sample_every_n_steps : int
+        Frequency of sampling checkpoints during optimization.
+    total_steps : int
+        Total number of optimization steps.
+
+    Methods
+    -------
+    sample_this_step(step: int) -> bool
+        Determines if a checkpoint should be sampled at the given step.
+    add_checkpoint(deformation_field: torch.Tensor, loss: float, step: int) -> None
+        Adds a new optimization checkpoint.
+    as_dict() -> dict
+        Returns a dictionary representation of the optimization trajectory.
+    to_json(filepath: str) -> None
+        Saves the optimization trajectory to a JSON file.
+    """
+
+    optimization_checkpoints: list[OptimizationCheckpoint]
+    sample_every_n_steps: int
+    total_steps: int
+
+    def __init__(self, sample_every_n_steps: int, total_steps: int):
+        self.optimization_checkpoints = []
+        self.sample_every_n_steps = sample_every_n_steps
+        self.total_steps = total_steps
+
+    def sample_this_step(self, step: int) -> bool:
+        return step % self.sample_every_n_steps == 0 or step == self.total_steps - 1
+
+    def add_checkpoint(
+        self, deformation_field: torch.Tensor, loss: float, step: int
+    ) -> None:
+        self.optimization_checkpoints.append(
+            OptimizationCheckpoint(deformation_field, loss, step)
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "optimization_checkpoints": [
+                cp.as_dict() for cp in self.optimization_checkpoints
+            ],
+            "sample_every_n_steps": self.sample_every_n_steps,
+            "total_steps": self.total_steps,
+        }
+
+    def to_json(self, filepath: str) -> None:
+        import json
+
+        with open(filepath, "w") as f:
+            json.dump(self.as_dict(), f)
 
 
 def estimate_motion(
@@ -451,6 +543,7 @@ def _compute_forward_pass(
           with shape (b, t, 2).
     """
     predicted_shifts = -1 * deformation_field(batch_subset_centers)
+    predicted_shifts = einops.rearrange(predicted_shifts, "b t yx -> t b yx")
 
     # Shift the patches by the predicted shifts
     shifted_patches = fourier_shift_dft_2d(
@@ -535,7 +628,9 @@ def estimate_motion_new(
     frequency_range: tuple[float, float] = (300, 10),
     optimizer_type: str = "adam",
     optimizer_kwargs: dict | None = None,
-) -> torch.Tensor:
+    return_trajectory: bool = False,
+    trajectory_kwargs: dict | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, OptimizationTrajectory]:
     """Estimate motion (new method)
 
     Parameters
@@ -558,10 +653,37 @@ def estimate_motion_new(
         Device to perform computation on. If None, uses the device of the input image.
     n_iterations: int
         Number of iterations for the optimization process. Default is 100.
+    b_factor: float
+        B-factor to apply in Fourier space to downweight high frequencies.
+        Default is 500.
+    frequency_range: tuple[float, float]
+        Frequency range in Angstroms for bandpass filtering (low, high).
+        Default is (300, 10).
+    optimizer_type: str
+        Type of optimizer to use ('adam' or 'lbfgs'). Default is 'adam'.
+    optimizer_kwargs: dict | None
+        Additional keyword arguments for the optimizer. If None, uses defaults.
+    return_trajectory: bool
+        Whether to return the optimization trajectory. Default is False. If true, a
+        second return value will be provided which is an OptimizationTrajectory object.
+    trajectory_kwargs: dict | None
+        Additional keyword arguments for the trajectory tracking. If None, uses
+        defaults.
+
+    Returns
+    -------
+    torch.Tensor | tuple[torch.Tensor, OptimizationTrajectory]
+        The estimated deformation field with shape (2, nt, nh, nw) where 2 corresponds
+        to (y, x) shifts. If `return_trajectory` is True, also returns an
+        OptimizationTrajectory object containing the optimization history.
     """
     device = device if device is not None else image.device
     image = image.to(device)
     t, h, w = image.shape
+
+    if return_trajectory:
+        trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
+        trajectory = OptimizationTrajectory(**trajectory_kwargs)
 
     # Normalize image based on stats from central 50% of image
     image = normalize_image(image)
@@ -599,12 +721,10 @@ def estimate_motion_new(
 
     # Reusable masks and Fourier filters
     # NOTE: This is assuming square patches... revisit if needed
-    # NOTE: Circle mask is quite small compared to patch size,
-    # @jdickerson95 @alisterburt should this be the case?
     circle_mask = circle(
         radius=patch_size[1] / 4,
         image_shape=patch_size,
-        smoothing_radius=patch_size[1] / 8,
+        smoothing_radius=patch_size[1] / 4,
         device=device,
     )
 
@@ -631,8 +751,11 @@ def estimate_motion_new(
     )
 
     # "Training" loop going over all patched n_iterations times
-    for iter_idx in range(n_iterations):
+    pbar = tqdm.tqdm(range(n_iterations))
+    for iter_idx in pbar:
         patch_iter = image_patch_iterator.get_iterator(batch_size=8)  # TODO: expose
+        total_loss = 0.0
+        n_batches = 0
 
         for patch_subset, patch_subset_centers in patch_iter:
             # patch_subset: (b, t, ph, pw)
@@ -676,17 +799,32 @@ def estimate_motion_new(
                     bandpass=None,  # TODO: add bandpass filter
                 )
 
-        # Log loss every 10 iterations
-        # TODO: Some more robust logging or optimization tracking mechanism?
-        if iter_idx % 10 == 0:
-            print(f"Iter {iter_idx} / {n_iterations}, Loss: {loss:.6f}")
+            total_loss += loss
+            n_batches += 1
+
+        # update tqdm with current running average loss for this iteration
+        current_avg_loss = total_loss / n_batches if n_batches > 0 else 0.0
+        pbar.set_postfix({"avg_batch_loss": f"{current_avg_loss:.6f}"})
+
+        # Record trajectory if requested
+        average_loss = total_loss / n_batches if n_batches > 0 else 0.0
+        if return_trajectory and trajectory.sample_this_step(iter_idx):
+            trajectory.add_checkpoint(
+                deformation_field=deformation_field.data,
+                loss=average_loss,
+                step=iter_idx,
+            )
 
     # Return final deformation field
     # QUESTION: Why are these commented out?
     average_shift = torch.mean(deformation_field.data)
     # final_deformation_field = deformation_field.data - average_shift
     final_deformation_field = deformation_field.data - average_shift
-    return final_deformation_field
+
+    if return_trajectory:
+        return final_deformation_field, trajectory
+    else:
+        return final_deformation_field
 
 
 def estimate_motion_lazy(
@@ -718,7 +856,6 @@ def estimate_motion_lazy(
     else:
         image = image.to(device)
 
-
     if initial_deformation_field is not None:
         initial_deformation_field = initial_deformation_field.to(device)
 
@@ -737,9 +874,11 @@ def estimate_motion_lazy(
             deformation_field=initial_deformation_field,
             target_resolution=(nt, nh, nw),
         )
-        
+
         print(f"Resampled initial deformation field to {deformation_field_data.shape}")
-        deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
+        deformation_field = CubicCatmullRomGrid3d.from_grid_data(
+            deformation_field_data
+        ).to(device)
 
     # normalize image based on stats from central 50% of image
     image = normalize_image(image)
@@ -877,7 +1016,7 @@ def estimate_motion_lazy(
                 motion_optimizer.zero_grad()
                 # Recompute forward pass in closure for L-BFGS
                 pred_shifts = -1 * deformation_field(patch_subset_centers)
-                #pred_shifts = deformation_field(patch_subset_centers)
+                # pred_shifts = deformation_field(patch_subset_centers)
                 pred_shifts_px = pred_shifts
                 shift_patches = fourier_shift_dft_2d(
                     dft=patch_subset,
