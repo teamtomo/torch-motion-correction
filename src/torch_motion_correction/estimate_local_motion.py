@@ -508,6 +508,7 @@ def _setup_optimizer(
 
 def _compute_forward_pass(
     deformation_field: CubicCatmullRomGrid3d,
+    new_deformation_field: CubicCatmullRomGrid3d,
     patch_subset: torch.Tensor,
     batch_subset_centers: torch.Tensor,
     ph: int,
@@ -521,6 +522,8 @@ def _compute_forward_pass(
     ----------
     deformation_field : CubicCatmullRomGrid3d
         The deformation field model to predict shifts.
+    new_deformation_field : CubicCatmullRomGrid3d
+        The new deformation field model to predict shifts.
     patch_subset : torch.Tensor
         A batch of image patches in Fourier space with shape (b, t, ph, pw).
     batch_subset_centers : torch.Tensor
@@ -545,7 +548,10 @@ def _compute_forward_pass(
         - predicted_shifts: The predicted shifts from the deformation field,
           with shape (b, t, 2).
     """
-    predicted_shifts = -1 * deformation_field(batch_subset_centers)
+    predicted_shifts = -1 * (
+        new_deformation_field(batch_subset_centers)
+        + deformation_field(batch_subset_centers)
+    )
     predicted_shifts = einops.rearrange(predicted_shifts, "b t yx -> t b yx")
 
     # Shift the patches by the predicted shifts
@@ -691,25 +697,7 @@ def estimate_motion_new(
     # Normalize image based on stats from central 50% of image
     image = normalize_image(image)
 
-    # Initialize a deformation field using pre-existing data, if provided
-    if initial_deformation_field is None:
-        initial_deformation_field = torch.zeros(
-            (2, *deformation_field_resolution),
-            device="cpu",  # NOTE: resample_deformation_field needs to support device before making on CUDA device
-        )
 
-    deformation_field = CubicCatmullRomGrid3d(
-        resolution=deformation_field_resolution, n_channels=2
-    ).to(device)
-
-    # # TODO: Resupport initialization
-    # deformation_field_data = resample_deformation_field(
-    #     deformation_field=initial_deformation_field,
-    #     target_resolution=deformation_field_resolution,
-    # )
-    # deformation_field_data = deformation_field_data.to(device)
-    # deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data)
-    # deformation_field = deformation_field.to(device)
 
     # Create the patch grid
     patch_positions = patch_grid_centers(
@@ -721,6 +709,28 @@ def estimate_motion_new(
     )  # (t, gh, gw, 3)
 
     gh, gw = patch_positions.shape[1:3]
+
+    print("Making new deformation field")
+    new_deformation_field = CubicCatmullRomGrid3d(
+        resolution=deformation_field_resolution, n_channels=2
+    ).to(device)
+    print("New deformation field made")
+    print("new_deformation_field.shape", new_deformation_field.data.shape)
+
+    if initial_deformation_field is None:
+        deformation_field_data = torch.zeros(size=(2, *deformation_field_resolution), device=device)
+    elif initial_deformation_field is not None:
+        deformation_field_data = resample_deformation_field(
+            deformation_field=initial_deformation_field.detach(),
+            target_resolution=(deformation_field_resolution[0], deformation_field_resolution[1], deformation_field_resolution[2]),
+        )
+        deformation_field_data -= torch.mean(deformation_field_data)
+        # deformation_field_data *= -1
+        print(f"Resampled initial deformation field to {deformation_field_data.shape}")
+    print("Making deformation field")
+    deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
+    print("Deformation field made")
+    print("deformation_field.shape", deformation_field.data.shape)
 
     # Reusable masks and Fourier filters
     # NOTE: This is assuming square patches... revisit if needed
@@ -757,7 +767,7 @@ def estimate_motion_new(
 
     motion_optimizer = _setup_optimizer(
         optimizer_type=optimizer_type,
-        parameters=deformation_field.parameters(),
+        parameters=new_deformation_field.parameters(),
         **(optimizer_kwargs if optimizer_kwargs is not None else {}),
     )
 
@@ -784,6 +794,7 @@ def estimate_motion_new(
             # to the mean of the patches in the batch.
             shifted_patches, predicted_shifts = _compute_forward_pass(
                 deformation_field=deformation_field,
+                new_deformation_field=new_deformation_field,
                 patch_subset=patch_subset,
                 batch_subset_centers=patch_subset_centers,
                 ph=patch_size[0],
@@ -839,10 +850,9 @@ def estimate_motion_new(
             )
 
     # Return final deformation field
-    # QUESTION: Why are these commented out?
-    average_shift = torch.mean(deformation_field.data)
-    # final_deformation_field = deformation_field.data - average_shift
-    final_deformation_field = deformation_field.data - average_shift
+    final_deformation_field = new_deformation_field.data + deformation_field.data
+    average_shift = torch.mean(final_deformation_field.data)
+    final_deformation_field = final_deformation_field.data - average_shift
 
     if return_trajectory:
         return final_deformation_field, trajectory
