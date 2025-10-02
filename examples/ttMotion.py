@@ -235,7 +235,7 @@ def motion_estimate_and_correct(movie : torch.Tensor, pixel_size : float) -> tor
     print(f"Correcting motion...")
     motion_corrected = correct_motion(
         image=movie,
-        deformation_grid=deformation_grid
+        deformation_field=deformation_grid
     )
     return motion_corrected
 
@@ -324,7 +324,7 @@ def motion_estimate_and_correct_cross_correlation_patches(movie : torch.Tensor, 
     
     corrected = correct_motion(
         image=movie,
-        deformation_grid=deformation_grid
+        deformation_field=deformation_grid
     )
     return corrected
 

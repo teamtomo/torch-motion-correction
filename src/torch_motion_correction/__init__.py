@@ -31,7 +31,6 @@ from torch_motion_correction.data_io import (
 
 
 __all__ = [
-    "estimate_motion",
     "estimate_local_motion",
     "correct_motion",
     "correct_motion_batched",
