@@ -53,23 +53,29 @@ def estimate_local_motion(
     # grab image and deformation field dims
     t, h, w = image.shape
     nt, nh, nw = deformation_field_resolution
-
+    
     # initialize deformation field
     # semantics: resample existing to target resolution or initialize as all zeros
-    if initial_deformation_field is None:
-        deformation_field = CubicCatmullRomGrid3d(
-            resolution=deformation_field_resolution,
-            n_channels=2
-        ).to(device)
-    else:
+    print(f"Initial deformation field: {initial_deformation_field}")
+
+    new_deformation_field = CubicCatmullRomGrid3d(
+        resolution=deformation_field_resolution,
+        n_channels=2
+    ).to(device)
+
+    if initial_deformation_field is not None:
         deformation_field_data = resample_deformation_field(
             deformation_field=initial_deformation_field,
             target_resolution=(nt, nh, nw),
         )
-        
+        deformation_field_data -= torch.mean(deformation_field_data)
+        #deformation_field_data *= -1
         print(f"Resampled initial deformation field to {deformation_field_data.shape}")
         deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
+        
 
+    #print(f"Deformation field: {deformation_field}")
+    
     # normalize image based on stats from central 50% of image
     image = normalize_image(image)
 
@@ -119,12 +125,12 @@ def estimate_local_motion(
     # Initialize optimizer
     if optimizer.lower() == 'adam':
         motion_optimiser = torch.optim.Adam(
-            params=deformation_field.parameters(),
+            params=new_deformation_field.parameters(),
             lr=learning_rate,
         )
     elif optimizer.lower() == 'lbfgs':
         motion_optimiser = torch.optim.LBFGS(
-            params=deformation_field.parameters(),
+            params=new_deformation_field.parameters(),
             lr=learning_rate,
             line_search_fn="strong_wolfe",
         )
@@ -171,7 +177,7 @@ def estimate_local_motion(
         patch_subset = patch_subset * bandpass * b_factor_envelope
 
         # Predict shifts at patch centers
-        predicted_shifts = -1 * deformation_field(patch_subset_centers)
+        predicted_shifts = -1 * (new_deformation_field(patch_subset_centers) + deformation_field(patch_subset_centers))
 
         # Shift patches by predicted shifts
         predicted_shifts_px = predicted_shifts
@@ -196,7 +202,8 @@ def estimate_local_motion(
             def closure():
                 motion_optimiser.zero_grad()
                 # Recompute forward pass in closure for L-BFGS
-                pred_shifts = -1 * deformation_field(patch_subset_centers)
+                pred_shifts = -1 * (new_deformation_field(patch_subset_centers))
+                pred_shifts = pred_shifts + (-1*deformation_field.data)
                 #pred_shifts = deformation_field(patch_subset_centers)
                 pred_shifts_px = pred_shifts
                 shift_patches = fourier_shift_dft_2d(
@@ -226,8 +233,19 @@ def estimate_local_motion(
                 print(f"{i}: loss = {loss.item():.6f}")
             else:
                 print(f"{i}: loss = {loss:.6f}")
-
+    
+    
+    print("new_deformation_field: min = {:.4f}, max = {:.4f}".format(
+        new_deformation_field.data.min().item(), new_deformation_field.data.max().item()))
+    print("deformation_field: min = {:.4f}, max = {:.4f}".format(
+        deformation_field.data.min().item(), deformation_field.data.max().item()))
     # Return final deformation field
-    average_shift = torch.mean(deformation_field.data)
-    final_deformation_field = deformation_field.data - average_shift
+    final_deformation_field = new_deformation_field.data + deformation_field.data
+    average_shift = torch.mean(final_deformation_field.data)
+    final_deformation_field = final_deformation_field.data - average_shift
+
+    #average_shift = torch.mean(initial_deformation_field.data)
+    #final_deformation_field = initial_deformation_field.data - average_shift
+    
     return final_deformation_field
+    #return initial_deformation_field

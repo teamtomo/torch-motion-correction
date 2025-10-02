@@ -11,6 +11,7 @@ from torch_fourier_shift import fourier_shift_dft_2d
 from torch_image_interpolation import sample_image_1d
 
 from torch_motion_correction.patch_grid import patch_grid_lazy
+from torch_motion_correction.evaluate_deformation_field import resample_deformation_field
 from torch_motion_correction.utils import (
     spatial_frequency_to_fftfreq,
     normalize_image,
@@ -277,8 +278,9 @@ def estimate_motion_cross_correlation_patches(
     else:
         # Update existing deformation field to match new dimensions
 
-        deformation_field = _update_deformation_field_dimensions(
-            deformation_field, (2, t, gh, gw), device
+        deformation_field = resample_deformation_field(
+            deformation_field=deformation_field,
+            target_resolution=(t, gh, gw),
         )
         print(f"Using existing deformation field as base for cumulative motion correction")
     
@@ -476,8 +478,8 @@ def _apply_temporal_smoothing(
     for gy in range(deformation_field.shape[2]):
         for gx in range(deformation_field.shape[3]):
             # Extract time series for this patch
-            y_series = deformation_field[0, :, gy, gx].cpu().numpy()
-            x_series = deformation_field[1, :, gy, gx].cpu().numpy()
+            y_series = deformation_field[0, :, gy, gx].detach().cpu().numpy()
+            x_series = deformation_field[1, :, gy, gx].detach().cpu().numpy()
             
             # Apply Savitzky-Golay smoothing
             if len(y_series) >= window_size:
@@ -563,8 +565,6 @@ def _create_deformation_field_from_whole_image_shifts(
     ----------
     shifts: torch.Tensor
         (t, 2) array of shifts for each frame in pixels (y, x)
-    image_shape: tuple[int, int, int]
-        Shape of the image (t, h, w)
     device: torch.device, optional
         Device for computation
         
@@ -577,10 +577,7 @@ def _create_deformation_field_from_whole_image_shifts(
         device = shifts.device
     else:
         shifts = shifts.to(device)
-    
-    t, h, w = image_shape
-    
-    # Create deformation field with constant shifts per frame
+    # Create deformation field with one yx shift per frame
     #deformation_field = -1 * einops.rearrange(shifts, 't c -> c t 1 1')
     deformation_field = einops.rearrange(shifts, 't c -> c t 1 1')
     
