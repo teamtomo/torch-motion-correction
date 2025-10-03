@@ -1,7 +1,7 @@
 import mrcfile
 import torch
 
-from torch_motion_correction import estimate_motion, correct_motion
+from torch_motion_correction import estimate_local_motion, correct_motion
 
 IMAGE_FILE = "../EMPIAR-10164-image-0deg-with-simulated-deformations.mrc"
 PIXEL_SPACING = 0.675 * 8
@@ -15,7 +15,7 @@ LEARNING_RATE = 0.05
 multi_frame_micrograph = torch.as_tensor(mrcfile.read(IMAGE_FILE)).float()
 
 # estimate motion
-deformation_grid = estimate_motion(
+deformation_grid = estimate_local_motion(
     image=multi_frame_micrograph,
     pixel_spacing=PIXEL_SPACING,
     deformation_field_resolution=LEARNED_DEFORMATION_FIELD_RESOLUTION,

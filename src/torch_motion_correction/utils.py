@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Sequence
+from torch_fourier_filter.bandpass import bandpass_filter
 
 import torch
 
@@ -43,13 +44,35 @@ def spatial_frequency_to_fftfreq(
     # cycles/distance * distance/px = cycles/px
     return torch.as_tensor(frequencies, dtype=torch.float32) * spacing
 
-def normalize_image(image: torch.Tensor):
+
+def normalize_image(
+    image: torch.Tensor, frac_low: float = 0.25, frac_high: float = 0.75
+) -> torch.Tensor:
+    """Normalizes the image by mean and std of a central box.
+
+    Parameters
+    ----------
+    image: torch.Tensor
+        (t, h, w) image to be normalized where t is the number of frames,
+        h is the height, and w is the width.
+    frac_low: float
+        Fractional lower bound of the central box in both height and width. Default is
+        0.25 (central 50%).
+    frac_high: float
+        Fractional upper bound of the central box in both height and width. Default is
+        0.75 (central 50%).
+
+    Returns
+    -------
+    normalized_image: torch.Tensor
+        (t, h, w) normalized image.
+    """
     # grab image dimensions
     t, h, w = image.shape
 
     # calculate limits of central box
-    hl, hu = int(0.25 * h), int(0.75 * h)
-    wl, wu = int(0.25 * w), int(0.75 * w)
+    hl, hu = int(frac_low * h), int(frac_high * h)
+    wl, wu = int(frac_low * w), int(frac_high * w)
 
     # calculate mean and std of central 50%
     center = image[:, hl:hu, wl:wu]
@@ -58,3 +81,33 @@ def normalize_image(image: torch.Tensor):
     # normalize and return
     image = (image - mean) / std
     return image
+
+
+def prepare_bandpass_filter(
+    frequency_range: tuple[float, float],  # angstroms
+    patch_shape: tuple[int, int],
+    pixel_spacing: float,  # angstroms
+    refinement_fraction: float = 1.0,  # [0, 1]
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Prepare bandpass filter for cross-correlation (fixed, no refinement)."""
+    ph, pw = patch_shape
+
+    # Use the higher resolution cutoff (smaller angstrom value)
+    cuton, cutoff_max = torch.as_tensor(frequency_range).float()  # angstroms
+    cutoff = torch.lerp(cuton, cutoff_max, refinement_fraction)
+    low_fftfreq = spatial_frequency_to_fftfreq(1 / cuton, spacing=pixel_spacing)
+    high_fftfreq = spatial_frequency_to_fftfreq(1 / cutoff, spacing=pixel_spacing)
+
+    # Prepare bandpass
+    bandpass = bandpass_filter(
+        low=low_fftfreq,
+        high=high_fftfreq,
+        falloff=0,
+        image_shape=(ph, pw),
+        rfft=True,
+        fftshift=False,
+        device=device,
+    )
+
+    return bandpass
