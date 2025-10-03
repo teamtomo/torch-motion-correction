@@ -39,6 +39,7 @@ def evaluate_deformation_field_at_t(
     shifts = einops.rearrange(shifts, "(h w) tyx -> tyx h w", h=h, w=w)
     return shifts
 
+
 def resample_deformation_field(
     deformation_field: torch.Tensor,
     target_resolution: tuple[int, int, int],
@@ -57,3 +58,37 @@ def resample_deformation_field(
 
     new_deformation_field = einops.rearrange(new_deformation_field, "nt nh nw tyx -> tyx nt nh nw")
     return new_deformation_field
+
+
+def image_shifts_to_deformation_field(
+    shifts: torch.Tensor,  # (t, 2) shifts in pixels
+    pixel_spacing: float,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """
+    Convert whole image shifts to a deformation field for compatibility.
+
+    Parameters
+    ----------
+    shifts: torch.Tensor
+        (t, 2) array of shifts for each frame in pixels (y, x)
+    device: torch.device, optional
+        Device for computation
+
+    Returns
+    -------
+    deformation_field: torch.Tensor
+        (2, t, 1, 1) deformation field with constant shifts per frame
+    """
+    if device is None:
+        device = shifts.device
+    else:
+        shifts = shifts.to(device)
+
+    # Rescale shifts in pixels to angstroms
+    shifts = shifts * pixel_spacing
+
+    # Create deformation field with one yx shift per frame
+    # deformation_field = -1 * einops.rearrange(shifts, 't c -> c t 1 1')
+    deformation_field = einops.rearrange(shifts, 't c -> c t 1 1')
+    return deformation_field

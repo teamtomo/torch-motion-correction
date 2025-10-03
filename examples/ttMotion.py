@@ -7,8 +7,8 @@ from torch_motion_correction import (
     correct_motion,
     correct_motion_batched,
     correct_motion_fast,
-    estimate_motion,
-    estimate_motion_cross_correlation_whole_image,
+    estimate_local_motion,
+    estimate_global_motion,
     estimate_motion_cross_correlation_patches,
     write_deformation_field_to_csv,
     read_deformation_field_from_csv,
@@ -243,7 +243,7 @@ def motion_estimate_and_correct_cross_correlation(movie : torch.Tensor, pixel_si
     print(f"Estimating motion cross correlation...")
     movie = movie.to(device="cuda:1")
 
-    shifts = estimate_motion_cross_correlation_whole_image(
+    shifts = estimate_global_motion(
         image=movie,
         pixel_spacing=pixel_size,
         reference_frame=None,  
@@ -287,7 +287,7 @@ def motion_estimate_and_correct_cross_correlation_refined(movie : torch.Tensor, 
 def motion_estimate_and_correct_cross_correlation_patches(movie : torch.Tensor, pixel_size : float) -> torch.Tensor:
     print(f"Estimating motion cross correlation patches...")
     movie = movie.to(device="cuda:1")
-    deformation_grid = estimate_motion_cross_correlation_whole_image(
+    deformation_grid = estimate_global_motion(
         image=movie,
         pixel_spacing=pixel_size,
         reference_frame=None,  
