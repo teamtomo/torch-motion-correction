@@ -15,6 +15,7 @@ from torch_image_interpolation.grid_sample_utils import array_to_grid_sample
 def correct_motion(
     image: torch.Tensor,  # (t, h, w)
     deformation_grid: torch.Tensor,  # (yx, t, h, w)
+    pixel_spacing: float,
     grad: bool = False,
     device: torch.device = None,
 ) -> torch.Tensor:
@@ -39,8 +40,9 @@ def correct_motion(
                 frame_deformation_grid=evaluate_deformation_field_at_t(
                     deformation_field=deformation_grid,
                     t=frame_t,
-                    grid_shape=(10 * gh, 10 * gw)
-                )
+                    grid_shape=(10 * gh, 10 * gw),
+                ),
+                pixel_spacing=pixel_spacing,
             )
             for frame, frame_t
             in zip(image, normalized_t)
@@ -51,6 +53,7 @@ def correct_motion(
 
 def _correct_frame(
     frame: torch.Tensor,
+    pixel_spacing: float,
     frame_deformation_grid: torch.Tensor,  # (yx, h, w)
 ) -> torch.Tensor:
     # grab frame and deformation grid dimensions
@@ -69,7 +72,7 @@ def _correct_frame(
     normalized_pixel_grid = pixel_grid / image_dim_lengths
     deformation_grid_interpolants = normalized_pixel_grid * deformation_grid_dim_lengths
     deformation_grid_interpolants = array_to_grid_sample(deformation_grid_interpolants, array_shape=(gh, gw)) # (gh, gw, xy)
-    pixel_shifts = F.grid_sample(
+    shifts_angstroms = F.grid_sample(
         input=einops.rearrange(frame_deformation_grid, 'yx h w -> 1 yx h w'),
         grid=einops.rearrange(deformation_grid_interpolants, 'h w xy -> 1 h w xy'),
         mode='bicubic',
@@ -77,6 +80,7 @@ def _correct_frame(
         align_corners=True,
     )  # (b, yx, h, w)
 
+    pixel_shifts = shifts_angstroms / pixel_spacing
     # find pixel positions to sample image data at, accounting for deformations
     pixel_shifts = einops.rearrange(pixel_shifts, '1 yx h w -> h w yx')
 

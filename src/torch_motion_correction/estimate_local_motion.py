@@ -173,12 +173,12 @@ def estimate_local_motion(
         total_loss = 0.0
         n_batches = 0
 
-        for patch_subset, patch_subset_centers in patch_iter:
+        for patch_batch, patch_batch_centers in patch_iter:
             # patch_subset: (b, t, ph, pw)
             # positions_subset: (b, t, 3)
 
-            patch_subset = patch_subset * circle_mask
-            patch_subset = torch.fft.rfftn(patch_subset, dim=(-2, -1))
+            patch_batch = patch_batch * circle_mask
+            patch_batch = torch.fft.rfftn(patch_batch, dim=(-2, -1))
 
             # # Use mean of all patches (for each batch)
             # reference_patches = torch.mean(patch_subset, dim=1, keepdim=True)
@@ -187,18 +187,19 @@ def estimate_local_motion(
             # Predict the shifts based on the deformation field and apply those
             # shifts to the patches. Shifted patches are use to compute loss relative
             # to the mean of the patches in the batch.
-            shifted_patches, predicted_shifts = _compute_shifted_patches_and_shifts(
+            shifted_patches, predicted_shifts_angstroms = _compute_shifted_patches_and_shifts(
                 initial_deformation_field=deformation_field,
                 new_deformation_field=new_deformation_field,
-                patch_subset=patch_subset,
-                batch_subset_centers=patch_subset_centers,
+                patch_batch=patch_batch,
+                patch_batch_centers=patch_batch_centers,
+                pixel_spacing=pixel_spacing,
                 ph=ph,
                 pw=pw,
                 b_factor_envelope=b_factor_envelope,
                 bandpass=bandpass_filter,
             )
 
-            # Use mean of all shifted patches (try to make them all similar)
+            # Calculate mean of all shifted patches over time to use as a reference
             reference_patches = torch.mean(shifted_patches, dim=1, keepdim=True)
 
             # Calculate loss, normalized by number of pixels in patches
@@ -228,7 +229,7 @@ def estimate_local_motion(
             total_loss += loss_value
             n_batches += 1
 
-        # Outside of patch subset loop, do the optimizer step once per iteration
+        # Step the optimizer after each pass over whole image
         motion_optimizer.step()
         motion_optimizer.zero_grad()
 
@@ -259,8 +260,9 @@ def estimate_local_motion(
 def _compute_shifted_patches_and_shifts(
     initial_deformation_field: CubicCatmullRomGrid3d,
     new_deformation_field: CubicCatmullRomGrid3d,
-    patch_subset: torch.Tensor,
-    batch_subset_centers: torch.Tensor,
+    patch_batch: torch.Tensor,
+    patch_batch_centers: torch.Tensor,
+    pixel_spacing: float,
     ph: int,
     pw: int,
     b_factor_envelope: torch.Tensor = None,
@@ -274,10 +276,12 @@ def _compute_shifted_patches_and_shifts(
         The deformation field model to predict shifts.
     new_deformation_field : CubicCatmullRomGrid3d
         The new deformation field model to predict shifts.
-    patch_subset : torch.Tensor
+    patch_batch : torch.Tensor
         A batch of image patches in Fourier space with shape (b, t, ph, pw).
-    batch_subset_centers : torch.Tensor
+    patch_batch_centers : torch.Tensor
         Normalized control point centers for the batch with shape (b, t, 3).
+    pixel_spacing : float
+        Pixel spacing in Angstroms.
     ph : int
         Patch height in pixels.
     pw : int
@@ -299,16 +303,18 @@ def _compute_shifted_patches_and_shifts(
           with shape (b, t, 2).
     """
     predicted_shifts = -1 * (
-        new_deformation_field(batch_subset_centers)
-        + initial_deformation_field(batch_subset_centers)
+        new_deformation_field(patch_batch_centers)
+        + initial_deformation_field(patch_batch_centers)
     )
     predicted_shifts = einops.rearrange(predicted_shifts, "b t yx -> t b yx")
+    predicted_shifts_px = predicted_shifts / pixel_spacing
+
 
     # Shift the patches by the predicted shifts
     shifted_patches = fourier_shift_dft_2d(
-        dft=patch_subset,
+        dft=patch_batch,
         image_shape=(ph, pw),
-        shifts=predicted_shifts,
+        shifts=predicted_shifts_px,
         rfft=True,
         fftshifted=False,
     )  # (b, t, ph, pw//2 + 1)

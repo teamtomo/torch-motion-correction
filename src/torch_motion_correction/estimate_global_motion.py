@@ -123,9 +123,7 @@ def estimate_global_motion(
           )
 
     final_deformation_field = image_shifts_to_deformation_field(
-        shifts=shifts,
-        image_shape=(t, h, w),
-        device=device
+        shifts=shifts, pixel_spacing=pixel_spacing, device=device
     )
 
     return final_deformation_field
