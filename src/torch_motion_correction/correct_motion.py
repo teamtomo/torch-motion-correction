@@ -5,7 +5,7 @@ from torch_grid_utils import coordinate_grid
 from torch_image_interpolation import sample_image_2d
 from torch_fourier_shift import fourier_shift_dft_2d
 
-from torch_motion_correction.evaluate_deformation_field import (
+from torch_motion_correction.deformation_field_utils import (
     evaluate_deformation_field, evaluate_deformation_field_at_t,
 )
 

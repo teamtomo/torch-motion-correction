@@ -16,7 +16,7 @@ from torch_motion_correction.correct_motion import (
     correct_motion_fast,
     correct_motion_slow,
 )
-from torch_motion_correction.evaluate_deformation_field import (
+from torch_motion_correction.deformation_field_utils import (
     evaluate_deformation_field,
 )
 from torch_motion_correction.estimate_motion_cross_correlation import (
