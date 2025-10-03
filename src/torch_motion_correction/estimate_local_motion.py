@@ -241,7 +241,7 @@ def estimate_local_motion(
         average_loss = total_loss / n_batches if n_batches > 0 else 0.0
         if return_trajectory and trajectory.sample_this_step(iter_idx):
             trajectory.add_checkpoint(
-                deformation_field=deformation_field.data,
+                deformation_field=new_deformation_field.data,
                 loss=average_loss,
                 step=iter_idx,
             )

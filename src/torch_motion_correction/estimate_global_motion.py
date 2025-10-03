@@ -5,8 +5,10 @@ from torch_grid_utils import circle
 from scipy.signal import savgol_filter
 
 from torch_motion_correction.patch_grid import patch_grid_lazy
-from torch_motion_correction.deformation_field_utils import resample_deformation_field, \
-    image_shifts_to_deformation_field
+from torch_motion_correction.deformation_field_utils import (
+    resample_deformation_field,
+    image_shifts_to_deformation_field,
+)
 from torch_motion_correction.utils import (
     normalize_image,
     prepare_bandpass_filter,

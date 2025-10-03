@@ -5,7 +5,7 @@ import torch
 
 
 class ImagePatchIterator:
-    """Helper data class for iterating over image patched around defined control points.
+    """Helper data class for iterating over image patches around defined control points.
 
     NOTE: Patches will be extracted on the same device as the image.
 
@@ -54,7 +54,7 @@ class ImagePatchIterator:
         Parameters
         ----------
         image : torch.Tensor
-            The input image to be patched (t, H, W).\
+            The input image to be patched (t, H, W).
 
         """
         assert len(image.shape) == 3, "Image must be 3D (t, H, W)"

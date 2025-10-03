@@ -48,7 +48,7 @@ def spatial_frequency_to_fftfreq(
 def normalize_image(
     image: torch.Tensor, frac_low: float = 0.25, frac_high: float = 0.75
 ) -> torch.Tensor:
-    """Normalized the image by mean and std of a central box.
+    """Normalizes the image by mean and std of a central box.
 
     Parameters
     ----------
