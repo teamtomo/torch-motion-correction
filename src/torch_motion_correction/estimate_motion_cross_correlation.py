@@ -11,7 +11,7 @@ from torch_fourier_shift import fourier_shift_dft_2d
 from torch_image_interpolation import sample_image_1d
 
 from torch_motion_correction.patch_grid import patch_grid_lazy
-from torch_motion_correction.evaluate_deformation_field import resample_deformation_field
+from torch_motion_correction.deformation_field_utils import resample_deformation_field
 from torch_motion_correction.utils import (
     spatial_frequency_to_fftfreq,
     normalize_image,

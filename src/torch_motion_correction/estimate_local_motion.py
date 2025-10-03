@@ -17,7 +17,7 @@ from torch_motion_correction.patch_grid import (
     patch_grid_lazy,
     patch_grid_centers,
 )
-from torch_motion_correction.evaluate_deformation_field import (
+from torch_motion_correction.deformation_field_utils import (
     resample_deformation_field,
 )
 from torch_motion_correction.utils import (
