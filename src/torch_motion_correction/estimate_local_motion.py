@@ -628,7 +628,7 @@ def _compute_forward_pass(
 def estimate_motion_new(
     image: torch.Tensor,  # (t, H, W)
     pixel_spacing: float,  # Angstroms
-    patch_size: tuple[int, int],  # (ph, pw)
+    patch_shape: tuple[int, int],  # (ph, pw)
     deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
     initial_deformation_field: torch.Tensor | None,  # (yx, nt, nh, nw)
     device: torch.device = None,
@@ -689,6 +689,7 @@ def estimate_motion_new(
     device = device if device is not None else image.device
     image = image.to(device)
     t, h, w = image.shape
+    ph, pw = patch_shape
 
     if return_trajectory:
         trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
@@ -702,8 +703,8 @@ def estimate_motion_new(
     # Create the patch grid
     patch_positions = patch_grid_centers(
         image_shape=(t, h, w),
-        patch_shape=(1, *patch_size),
-        patch_step=(1, patch_size[0] // 2, patch_size[1] // 2),  # Default 50% overlap
+        patch_shape=(1, ph, pw),
+        patch_step=(1, ph // 2, pw // 2),  # Default 50% overlap
         distribute_patches=True,
         device=device,
     )  # (t, gh, gw, 3)
@@ -735,15 +736,15 @@ def estimate_motion_new(
     # Reusable masks and Fourier filters
     # NOTE: This is assuming square patches... revisit if needed
     circle_mask = circle(
-        radius=patch_size[1] / 4,
-        image_shape=patch_size,
-        smoothing_radius=patch_size[1] / 4,
+        radius=patch_shape[1] / 4,
+        image_shape=patch_shape,
+        smoothing_radius=patch_shape[1] / 4,
         device=device,
     )
 
     b_factor_envelope = b_envelope(
         B=b_factor,
-        image_shape=patch_size,
+        image_shape=patch_shape,
         pixel_size=pixel_spacing,
         rfft=True,
         fftshift=False,
@@ -752,7 +753,7 @@ def estimate_motion_new(
 
     bandpass_filter = prepare_bandpass_filter(
         frequency_range=frequency_range,
-        patch_shape=patch_size,
+        patch_shape=patch_shape,
         pixel_spacing=pixel_spacing,
         refinement_fraction=1.0,  # Not used in this context
         device=device,
@@ -761,7 +762,7 @@ def estimate_motion_new(
     # Instantiate the patch iterator (mini-batch like data-loader)
     image_patch_iterator = ImagePatchIterator(
         image=image,
-        patch_size=patch_size,
+        patch_size=patch_shape,
         control_points=patch_positions,
     )
 
@@ -797,8 +798,8 @@ def estimate_motion_new(
                 new_deformation_field=new_deformation_field,
                 patch_subset=patch_subset,
                 batch_subset_centers=patch_subset_centers,
-                ph=patch_size[0],
-                pw=patch_size[1],
+                ph=ph,
+                pw=pw,
                 b_factor_envelope=b_factor_envelope,
                 bandpass=bandpass_filter,
             )
@@ -806,10 +807,10 @@ def estimate_motion_new(
             # Use mean of all shifted patches (try to make them all similar)
             reference_patches = torch.mean(shifted_patches, dim=1, keepdim=True)
 
-            # Use gradient accumulation to optimize over all patches simultaneously
-            loss = torch.mean((shifted_patches - reference_patches).abs() ** 2)
-            loss.backward()
-            loss_value = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
+
+            # Calculate loss, normalized by number of pixels in patches
+            loss = torch.mean((shifted_patches - reference_patches).abs() ** 2) / (ph * pw)
+
 
             # # Optimizer step
             # if optimizer_type.lower() == "adam":
@@ -829,6 +830,9 @@ def estimate_motion_new(
             #         bandpass=None,  # TODO: add bandpass filter
             #     )
 
+            # Use gradient accumulation to optimize over all patches simultaneously
+            loss.backward()
+            loss_value = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
             total_loss += loss_value
             n_batches += 1
 
