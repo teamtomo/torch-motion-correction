@@ -15,6 +15,7 @@ from torch_motion_correction.correct_motion import (
     correct_motion_batched, 
     correct_motion_fast,
     correct_motion_slow,
+    get_pixel_shifts,
 )
 from torch_motion_correction.deformation_field_utils import (
     evaluate_deformation_field,
@@ -41,4 +42,5 @@ __all__ = [
     "estimate_motion_cross_correlation_patches",
     "write_deformation_field_to_csv",
     "read_deformation_field_from_csv",
+    "get_pixel_shifts",
 ]
