@@ -19,6 +19,7 @@ from torch_motion_correction.correct_motion import (
 )
 from torch_motion_correction.deformation_field_utils import (
     evaluate_deformation_field,
+    evaluate_deformation_field_at_t,
 )
 from torch_motion_correction.estimate_global_motion import (
     estimate_global_motion,
@@ -38,6 +39,7 @@ __all__ = [
     "correct_motion_fast",
     "correct_motion_slow",
     "evaluate_deformation_field",
+    "evaluate_deformation_field_at_t",
     "estimate_global_motion",
     "estimate_motion_cross_correlation_patches",
     "write_deformation_field_to_csv",

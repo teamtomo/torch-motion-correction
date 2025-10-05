@@ -14,7 +14,7 @@ from torch_image_interpolation.grid_sample_utils import array_to_grid_sample
 
 def correct_motion(
     image: torch.Tensor,  # (t, h, w)
-    deformation_grid: torch.Tensor,  # (yx, t, h, w)
+    deformation_grid: torch.Tensor,  # (yx, gt, gh, gw)
     pixel_spacing: float,
     grad: bool = False,
     device: torch.device = None,
@@ -71,7 +71,7 @@ def _correct_frame(
         pixel_spacing=pixel_spacing,
         frame_deformation_grid=frame_deformation_grid,
         pixel_grid=pixel_grid,
-    )
+    ) # (h, w, yx)
 
     # todo: make sure semantics around deformation field interpolants (i.e. spatiotemporally resolved shifts) are crystal clear
     deformed_pixel_coords = pixel_grid + pixel_shifts
