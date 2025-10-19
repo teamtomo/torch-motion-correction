@@ -9,7 +9,7 @@ except PackageNotFoundError:
 __author__ = "Alister Burt"
 __email__ = "alisterburt@gmail.com"
 
-from torch_motion_correction.estimate_local_motion import estimate_local_motion
+from torch_motion_correction.estimate_local_motion import estimate_local_motion, estimate_local_motion_2dtm
 from torch_motion_correction.correct_motion import (
     correct_motion, 
     correct_motion_batched, 
@@ -34,6 +34,7 @@ from torch_motion_correction.data_io import (
 
 __all__ = [
     "estimate_local_motion",
+    "estimate_local_motion_2dtm",
     "correct_motion",
     "correct_motion_batched",
     "correct_motion_fast",
