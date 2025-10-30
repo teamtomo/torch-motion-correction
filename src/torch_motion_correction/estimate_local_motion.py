@@ -1,7 +1,7 @@
 import tqdm
 import einops
 import torch
-from torch_cubic_spline_grids import CubicCatmullRomGrid3d
+from torch_cubic_spline_grids import CubicCatmullRomGrid3d, CubicBSplineGrid3d
 from torch_fourier_filter.envelopes import b_envelope
 from torch_fourier_shift import fourier_shift_dft_2d
 from torch_grid_utils import circle
@@ -31,6 +31,7 @@ def estimate_local_motion(
     b_factor: float = 500,
     frequency_range: tuple[float, float] = (300, 10),  # angstroms
     optimizer_type: str = "adam",
+    grid_type: str = "catmull_rom",
     optimizer_kwargs: dict | None = None,
     return_trajectory: bool = False,
     trajectory_kwargs: dict | None = None,
@@ -65,6 +66,8 @@ def estimate_local_motion(
         Default is (300, 10).
     optimizer_type: str
         Type of optimizer to use ('adam' or 'lbfgs'). Default is 'adam'.
+    grid_type: str
+        Type of grid to use ('catmull_rom' or 'bspline'). Default is 'catmull_rom'.
     optimizer_kwargs: dict | None
         Additional keyword arguments for the optimizer. If None, uses defaults.
     return_trajectory: bool
@@ -105,9 +108,14 @@ def estimate_local_motion(
     gh, gw = patch_positions.shape[1:3]
 
     print("Making new deformation field")
-    new_deformation_field = CubicCatmullRomGrid3d(
-        resolution=deformation_field_resolution, n_channels=2
-    ).to(device)
+    if grid_type == "catmull_rom":
+        new_deformation_field = CubicCatmullRomGrid3d(
+            resolution=deformation_field_resolution, n_channels=2
+        ).to(device)
+    elif grid_type == "bspline":
+        new_deformation_field = CubicBSplineGrid3d(
+            resolution=deformation_field_resolution, n_channels=2
+        ).to(device)
     print("New deformation field made")
     print("new_deformation_field.shape", new_deformation_field.data.shape)
 
@@ -123,7 +131,10 @@ def estimate_local_motion(
         # deformation_field_data *= -1
         print(f"Resampled initial deformation field to {deformation_field_data.shape}")
     print("Making deformation field")
-    deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
+    if grid_type == "catmull_rom":
+        deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field_data).to(device)
+    elif grid_type == "bspline":
+        deformation_field = CubicBSplineGrid3d.from_grid_data(deformation_field_data).to(device)
     print("Deformation field made")
     print("deformation_field.shape", deformation_field.data.shape)
 

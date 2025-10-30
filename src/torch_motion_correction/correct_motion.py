@@ -17,6 +17,7 @@ def correct_motion(
     deformation_grid: torch.Tensor,  # (yx, t, h, w)
     pixel_spacing: float,
     grad: bool = False,
+    grid_type: str = "catmull_rom",
     device: torch.device = None,
 ) -> torch.Tensor:
     if device is None:
@@ -41,6 +42,7 @@ def correct_motion(
                     deformation_field=deformation_grid,
                     t=frame_t,
                     grid_shape=(10 * gh, 10 * gw),
+                    grid_type=grid_type,
                 ),
                 pixel_spacing=pixel_spacing,
             )

@@ -1,15 +1,34 @@
 import einops
 import torch
 import torch.nn.functional as F
-from torch_cubic_spline_grids import CubicCatmullRomGrid3d
+from torch_cubic_spline_grids import CubicCatmullRomGrid3d, CubicBSplineGrid3d
 
 
 def evaluate_deformation_field(
     deformation_field: torch.Tensor,  # (yx, nt, nh, nw)
     tyx: torch.Tensor,  # (..., 3)
+    grid_type: str = "catmull_rom",
 ) -> torch.Tensor:  # (
-    """Evaluate shifts from deformation field data."""
-    deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field).to(deformation_field.device)
+    """Evaluate shifts from deformation field data.
+
+    Parameters
+    ----------
+    deformation_field: torch.Tensor
+        (yx, nt, nh, nw) deformation field data
+    tyx: torch.Tensor
+        (..., 3) coordinate grid
+    grid_type: str
+        Type of grid to use ('catmull_rom' or 'bspline'). Default is 'catmull_rom'.
+
+    Returns
+    -------
+    predicted_shifts: torch.Tensor
+        (..., 2) predicted shifts
+    """
+    if grid_type == "catmull_rom":
+        deformation_field = CubicCatmullRomGrid3d.from_grid_data(deformation_field).to(deformation_field.device)
+    elif grid_type == "bspline":
+        deformation_field = CubicBSplineGrid3d.from_grid_data(deformation_field).to(deformation_field.device)
     predicted_shifts = deformation_field(tyx)
     return predicted_shifts
 
@@ -18,10 +37,25 @@ def evaluate_deformation_field_at_t(
     deformation_field: torch.Tensor,  # (yx, nt, nh, nw)
     t: float,  # [0, 1]
     grid_shape: tuple[int, int],  # (h, w)
+    grid_type: str = "catmull_rom",
 ) -> torch.Tensor:
     """Evaluate a grid of shifts at a specific timepoint from deformation field data.
 
-     output: (tyx, h, w)
+    Parameters
+    ----------
+    deformation_field: torch.Tensor
+        (yx, nt, nh, nw) deformation field data
+    t: float
+        Timepoint to evaluate at [0, 1]
+    grid_shape: tuple[int, int]
+        (h, w) shape of the grid to evaluate at
+    grid_type: str
+        Type of grid to use ('catmull_rom' or 'bspline'). Default is 'catmull_rom'.
+
+    Returns
+    -------
+    shifts: torch.Tensor
+        (tyx, h, w) predicted shifts
      """
     h, w = grid_shape
     y = torch.linspace(0, 1, steps=h, device=deformation_field.device)
@@ -35,7 +69,7 @@ def evaluate_deformation_field_at_t(
     tyx_grid = F.pad(yx_grid, (1, 0), value=t)  # (h*w, 3)
 
     # Evaluate deformation grid and return as (tyx, h, w)
-    shifts = evaluate_deformation_field(deformation_field, tyx=tyx_grid)  # (h*w, c)
+    shifts = evaluate_deformation_field(deformation_field, tyx=tyx_grid, grid_type=grid_type)  # (h*w, c)
     shifts = einops.rearrange(shifts, "(h w) tyx -> tyx h w", h=h, w=w)
     return shifts
 
