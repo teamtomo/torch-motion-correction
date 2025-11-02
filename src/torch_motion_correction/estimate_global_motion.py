@@ -231,6 +231,8 @@ def estimate_motion_cross_correlation_patches(
             image = correct_motion(
                 image=image,
                 deformation_grid=deformation_field,
+                pixel_spacing=pixel_spacing,
+                grid_type='bspline',
                 device=device
             )
     # Split into patch grid size patches with 50% overlap
@@ -355,6 +357,9 @@ def estimate_motion_cross_correlation_patches(
             )
 
         # Add shifts to existing deformation field (cumulative motion correction)
+        #Convert pixels to Angstroms
+        shift_y = shift_y * pixel_spacing
+        shift_x = shift_x * pixel_spacing
         deformation_field[0, frame_idx, :, :] += shift_y  # subtract shift for deformation field
         deformation_field[1, frame_idx, :, :] += shift_x
 
@@ -376,6 +381,8 @@ def estimate_motion_cross_correlation_patches(
           )
 
     print(f"Estimated deformation field shape: {deformation_field.shape}")
+
+    deformation_field = deformation_field - torch.mean(deformation_field)
     return deformation_field, data_patch_positions
 
 

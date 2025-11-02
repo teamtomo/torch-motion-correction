@@ -1,6 +1,7 @@
 import tqdm
 import einops
 import torch
+import torch.utils.checkpoint as checkpoint
 from torch_cubic_spline_grids import CubicCatmullRomGrid3d, CubicBSplineGrid3d
 from torch_fourier_filter.envelopes import b_envelope
 from torch_fourier_shift import fourier_shift_dft_2d
@@ -32,6 +33,7 @@ def estimate_local_motion(
     frequency_range: tuple[float, float] = (300, 10),  # angstroms
     optimizer_type: str = "adam",
     grid_type: str = "catmull_rom",
+    loss_type: str = "mse",
     optimizer_kwargs: dict | None = None,
     return_trajectory: bool = False,
     trajectory_kwargs: dict | None = None,
@@ -45,7 +47,7 @@ def estimate_local_motion(
         H is the height, and W is the width.
     pixel_spacing: float
         Pixel spacing in Angstroms.
-    patch_size: tuple[int, int]
+    patch_shape: tuple[int, int]
         Size of the patches to extract (ph, pw) in terms of pixels.
     deformation_field_resolution: tuple[int, int, int]
         Resolution of the deformation field (nt, nh, nw) where nt is the number of
@@ -64,6 +66,8 @@ def estimate_local_motion(
     frequency_range: tuple[float, float]
         Frequency range in Angstroms for bandpass filtering (low, high).
         Default is (300, 10).
+    loss_type: str
+        Type of loss to use ('mse', 'cc' or 'ncc'). Default is 'mse'.
     optimizer_type: str
         Type of optimizer to use ('adam' or 'lbfgs'). Default is 'adam'.
     grid_type: str
@@ -91,6 +95,9 @@ def estimate_local_motion(
 
     if return_trajectory:
         trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
+        # Provide sensible defaults when not supplied
+        trajectory_kwargs.setdefault("sample_every_n_steps", 1)
+        trajectory_kwargs.setdefault("total_steps", n_iterations)
         trajectory = OptimizationTracker(**trajectory_kwargs)
 
     # Normalize image based on stats from central 50% of image
@@ -177,85 +184,165 @@ def estimate_local_motion(
         **(optimizer_kwargs if optimizer_kwargs is not None else {}),
     )
 
+    # For LBFGS, optionally subsample patches per closure to reduce memory
+    # This uses a subset of patches for each closure call, which is common practice
+    lbfgs_patch_subsample = None
+    use_checkpointing = True
+    if optimizer_type.lower() == "lbfgs":
+        lbfgs_patch_subsample = optimizer_kwargs.get("lbfgs_patch_subsample", None) if optimizer_kwargs else None
+        # Check if gradient checkpointing is enabled (default: True for memory savings)
+        use_checkpointing = optimizer_kwargs.get("use_gradient_checkpointing", True) if optimizer_kwargs else True
+
     # "Training" loop going over all patched n_iterations times
     pbar = tqdm.tqdm(range(n_iterations))
     for iter_idx in pbar:
-        patch_iter = image_patch_iterator.get_iterator(batch_size=8)  # TODO: expose
-        total_loss = 0.0
-        n_batches = 0
+        if optimizer_type.lower() == "lbfgs":
+            
+            def compute_patch_loss(patch_batch, patch_batch_centers):
+                """Helper function for gradient checkpointing - wraps expensive computation."""
+                # Apply circular mask in real space; then FFT to rfft with shape (b, t, ph, pw//2 + 1)
+                patch_batch_masked = patch_batch * circle_mask
+                patch_batch_fft = torch.fft.rfftn(patch_batch_masked, dim=(-2, -1))
 
-        for patch_batch, patch_batch_centers in patch_iter:
-            # patch_subset: (b, t, ph, pw)
-            # positions_subset: (b, t, 3)
+                shifted_patches, _predicted_shifts_angstroms = _compute_shifted_patches_and_shifts(
+                    initial_deformation_field=deformation_field,
+                    new_deformation_field=new_deformation_field,
+                    patch_batch=patch_batch_fft,
+                    patch_batch_centers=patch_batch_centers,
+                    pixel_spacing=pixel_spacing,
+                    ph=ph,
+                    pw=pw,
+                    b_factor_envelope=b_factor_envelope,
+                    bandpass=bandpass_filter,
+                )
 
-            patch_batch = patch_batch * circle_mask
-            patch_batch = torch.fft.rfftn(patch_batch, dim=(-2, -1))
+                # shifted_patches: (b, t, ph, pw//2 + 1)
+                # For each frame, use mean of all OTHER frames as reference -> (b, t, ph, pw//2 + 1)
+                total_sum = torch.sum(shifted_patches, dim=1, keepdim=True)  # (b, 1, ph, pw//2 + 1)
+                if t > 1:
+                    reference_patches = (total_sum - shifted_patches) / (t - 1)  # (b, t, ph, pw//2 + 1)
+                else:
+                    reference_patches = shifted_patches
+                # Original MSE loss in Fourier domain; normalized by number of pixels for scale stability
+                batch_loss = _compute_loss(shifted_patches, reference_patches, ph, pw, loss_type=loss_type)
+                return batch_loss
+            
+            def closure():
+                motion_optimizer.zero_grad()
+                # Process batches one at a time to minimize memory usage
+                # Accumulate weighted loss sum (maintaining computation graph) instead of stacking
+                weighted_loss_sum = None
+                n_batches = 0
+                # Iterate over mini-batches of patches (deterministic order for LBFGS)
+                # patch_batch: (b, t, ph, pw)
+                # patch_batch_centers: (b, t, 3)
+                iterator = image_patch_iterator.get_iterator(batch_size=1, randomized=True)
+                for idx, (patch_batch, patch_batch_centers) in enumerate(iterator):
+                    # Optional subsampling: skip patches if specified (reduces memory)
+                    if lbfgs_patch_subsample is not None and idx >= lbfgs_patch_subsample:
+                        break
+                    
+                    # Use gradient checkpointing to trade compute for memory (~50% memory savings)
+                    if use_checkpointing:
+                        batch_loss = checkpoint.checkpoint(
+                            compute_patch_loss,
+                            patch_batch,
+                            patch_batch_centers,
+                            use_reentrant=False,  # Required for LBFGS compatibility
+                        )
+                    else:
+                        # No checkpointing - faster but uses more memory
+                        batch_loss = compute_patch_loss(patch_batch, patch_batch_centers)
+                    
+                    # Accumulate weighted sum (still in computation graph) to avoid stacking
+                    if weighted_loss_sum is None:
+                        weighted_loss_sum = batch_loss
+                    else:
+                        weighted_loss_sum = weighted_loss_sum + batch_loss
+                    n_batches += 1
 
-            # # Use mean of all patches (for each batch)
-            # reference_patches = torch.mean(patch_subset, dim=1, keepdim=True)
-            # # print("reference_patches.shape", reference_patches.shape)
+                if n_batches == 0:
+                    return torch.tensor(0.0, device=device, requires_grad=True)
+                # Compute average loss (still connected to all batch computation graphs)
+                avg_loss = weighted_loss_sum / n_batches
+                # Call backward once on the average to accumulate all gradients
+                avg_loss.backward()
+                return avg_loss
 
-            # Predict the shifts based on the deformation field and apply those
-            # shifts to the patches. Shifted patches are use to compute loss relative
-            # to the mean of the patches in the batch.
-            shifted_patches, predicted_shifts_angstroms = _compute_shifted_patches_and_shifts(
-                initial_deformation_field=deformation_field,
-                new_deformation_field=new_deformation_field,
-                patch_batch=patch_batch,
-                patch_batch_centers=patch_batch_centers,
-                pixel_spacing=pixel_spacing,
-                ph=ph,
-                pw=pw,
-                b_factor_envelope=b_factor_envelope,
-                bandpass=bandpass_filter,
-            )
+            avg_loss_tensor = motion_optimizer.step(closure)
+            avg_loss_value = float(avg_loss_tensor.detach()) if isinstance(avg_loss_tensor, torch.Tensor) else float(avg_loss_tensor)
+            
+            # Clear CUDA cache after optimizer step (safer - gradients already computed)
+            #if device.type == "cuda":
+            #    torch.cuda.empty_cache()
 
-            # Calculate mean of all shifted patches over time to use as a reference
-            reference_patches = torch.mean(shifted_patches, dim=1, keepdim=True)
+            # update tqdm with current running average loss for this iteration
+            pbar.set_postfix({"avg_batch_loss": f"{avg_loss_value:.6f}"})
 
-            # Calculate loss, normalized by number of pixels in patches
-            loss = torch.mean((shifted_patches - reference_patches).abs() ** 2) / (ph * pw)
+            # Record trajectory if requested
+            if return_trajectory and trajectory.sample_this_step(iter_idx):
+                trajectory.add_checkpoint(
+                    deformation_field=new_deformation_field.data,
+                    loss=avg_loss_value,
+                    step=iter_idx,
+                )
 
-            # # Optimizer step
-            # if optimizer_type.lower() == "adam":
-            #     loss = _optimizer_step_adam(
-            #         motion_optimizer=motion_optimizer,
-            #         shifted_patches=shifted_patches,
-            #         reference_patches=reference_patches,
-            #     )
-            # elif optimizer_type.lower() == "lbfgs":
-            #     loss = _optimizer_step_lbfgs(
-            #         motion_optimizer=motion_optimizer,
-            #         deformation_field=deformation_field,
-            #         patch_subset=patch_subset,
-            #         patch_subset_centers=patch_subset_centers,
-            #         patch_shape=patch_size,
-            #         b_factor_envelope=b_factor_envelope,
-            #         bandpass=None,  # TODO: add bandpass filter
-            #     )
+        else:
+            patch_iter = image_patch_iterator.get_iterator(batch_size=8)  # TODO: expose
+            total_loss = 0.0
+            n_batches = 0
+            # Iterate over mini-batches of patches
+            # patch_batch: (b, t, ph, pw)
+            # patch_batch_centers: (b, t, 3)
+            for patch_batch, patch_batch_centers in patch_iter:
+                # Apply circular mask in real space; then FFT to rfft with shape (b, t, ph, pw//2 + 1)
+                patch_batch = patch_batch * circle_mask
+                patch_batch = torch.fft.rfftn(patch_batch, dim=(-2, -1))
 
-            # Use gradient accumulation to optimize over all patches simultaneously
-            loss.backward()
-            loss_value = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
-            total_loss += loss_value
-            n_batches += 1
+                shifted_patches, _predicted_shifts_angstroms = _compute_shifted_patches_and_shifts(
+                    initial_deformation_field=deformation_field,
+                    new_deformation_field=new_deformation_field,
+                    patch_batch=patch_batch,
+                    patch_batch_centers=patch_batch_centers,
+                    pixel_spacing=pixel_spacing,
+                    ph=ph,
+                    pw=pw,
+                    b_factor_envelope=b_factor_envelope,
+                    bandpass=bandpass_filter,
+                )
 
-        # Step the optimizer after each pass over whole image
-        motion_optimizer.step()
-        motion_optimizer.zero_grad()
+                # shifted_patches: (b, t, ph, pw//2 + 1)
+                # For each frame, use mean of all OTHER frames as reference -> (b, t, ph, pw//2 + 1)
+                total_sum = torch.sum(shifted_patches, dim=1, keepdim=True)  # (b, 1, ph, pw//2 + 1)
+                if t > 1:
+                    reference_patches = (total_sum - shifted_patches) / (t - 1)  # (b, t, ph, pw//2 + 1)
+                else:
+                    reference_patches = shifted_patches
+                # Original MSE loss in Fourier domain; normalized by number of pixels for scale stability
+                loss = _compute_loss(shifted_patches, reference_patches, ph, pw, loss_type=loss_type)
 
-        # update tqdm with current running average loss for this iteration
-        current_avg_loss = total_loss / n_batches if n_batches > 0 else 0.0
-        pbar.set_postfix({"avg_batch_loss": f"{current_avg_loss:.6f}"})
+                # Use gradient accumulation to optimize over all patches simultaneously
+                loss.backward()
+                loss_value = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
+                total_loss += loss_value
+                n_batches += 1
 
-        # Record trajectory if requested
-        average_loss = total_loss / n_batches if n_batches > 0 else 0.0
-        if return_trajectory and trajectory.sample_this_step(iter_idx):
-            trajectory.add_checkpoint(
-                deformation_field=new_deformation_field.data,
-                loss=average_loss,
-                step=iter_idx,
-            )
+            # Step the optimizer after each pass over whole image
+            motion_optimizer.step()
+            motion_optimizer.zero_grad()
+
+            # update tqdm with current running average loss for this iteration
+            current_avg_loss = total_loss / n_batches if n_batches > 0 else 0.0
+            pbar.set_postfix({"avg_batch_loss": f"{current_avg_loss:.6f}"})
+
+            # Record trajectory if requested
+            average_loss = total_loss / n_batches if n_batches > 0 else 0.0
+            if return_trajectory and trajectory.sample_this_step(iter_idx):
+                trajectory.add_checkpoint(
+                    deformation_field=new_deformation_field.data,
+                    loss=average_loss,
+                    step=iter_idx,
+                )
 
     # Return final deformation field
     final_deformation_field = new_deformation_field.data + deformation_field.data
@@ -362,14 +449,45 @@ def _setup_optimizer(
         )
     elif optimizer_type.lower() == "sgd":
         lr = kwargs.get("lr", 0.01)
-        return torch.optim.SGD(params=parameters, lr=lr)
+        momentum = kwargs.get("momentum", 0.9)  # Default momentum for stability
+        weight_decay = kwargs.get("weight_decay", 0)
+        dampening = kwargs.get("dampening", 0)
+        nesterov = kwargs.get("nesterov", True)
+        return torch.optim.SGD(
+            params=parameters,
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+            dampening=dampening,
+            nesterov=nesterov,
+        )
+    elif optimizer_type.lower() == "rmsprop":
+        lr = kwargs.get("lr", 0.01)
+        alpha = kwargs.get("alpha", 0.99)
+        eps = kwargs.get("eps", 1e-08)
+        weight_decay = kwargs.get("weight_decay", 0)
+        momentum = kwargs.get("momentum", 0)
+        centered = kwargs.get("centered", False)
+        return torch.optim.RMSprop(
+            params=parameters,
+            lr=lr,
+            alpha=alpha,
+            eps=eps,
+            weight_decay=weight_decay,
+            momentum=momentum,
+            centered=centered,
+        )
     elif optimizer_type.lower() == "lbfgs":
         lr = kwargs.get("lr", 1)
-        max_iter = kwargs.get("max_iter", 20)
+        lbfgs_patch_subsample = kwargs.get("lbfgs_patch_subsample", 1)
+        max_iter = kwargs.get("max_iter", 1)  # Minimal line search to reduce memory usage
         max_eval = kwargs.get("max_eval", None)
-        tolerance_grad = kwargs.get("tolerance_grad", 1e-07)
-        tolerance_change = kwargs.get("tolerance_change", 1e-09)
-        history_size = kwargs.get("history_size", 100)
+        tolerance_grad = kwargs.get("tolerance_grad", 1e-11)
+        tolerance_change = kwargs.get("tolerance_change", 1e-11)
+        history_size = kwargs.get("history_size", 5)  # Reduced from default 100 to save memory
+        # Limit max_eval to prevent excessive closure calls (defaults to max_iter * 2)
+        if max_eval is None:
+            max_eval = max(1, int(max_iter * 1.25))  # Minimal evaluations
         line_search_fn = kwargs.get("line_search_fn", "strong_wolfe")
         return torch.optim.LBFGS(
             params=parameters,
@@ -383,7 +501,65 @@ def _setup_optimizer(
         )
     else:
         raise ValueError(
-            f"Unsupported optimizer: {optimizer_type}. Choose 'adam' or 'lbfgs'."
+            f"Unsupported optimizer: {optimizer_type}. Choose 'adam', 'sgd', 'rmsprop', or 'lbfgs'."
         )
 
+def _compute_loss(
+        shifted_patches: torch.Tensor,
+        reference_patches: torch.Tensor,
+        ph: int,
+        pw: int,
+        loss_type: str = "mse", 
+    ) -> torch.Tensor:
+    '''Compute the loss for a batch of shifted patches and reference patches.
+
+    Parameters
+    ----------
+    shifted_patches : torch.Tensor
+        The shifted patches with shape (b, t, ph, pw//2 + 1).
+    reference_patches : torch.Tensor
+        The reference patches with shape (b, t, ph, pw//2 + 1).
+    ph : int
+        Patch height in pixels.
+    pw : int
+        Patch width in pixels.
+    loss_type : str, optional
+        The type of loss to compute. Default is "mse". Other option is normalized cross-correlation (ncc).
+    '''
+    if loss_type == "mse":
+        return torch.mean((shifted_patches - reference_patches).abs() ** 2) / (ph * pw)
+    elif loss_type == "ncc":
+        # Inputs are in rFFT space with shapes:
+        # shifted_patches: (b, t, ph, pw//2 + 1)
+        # reference_patches: (b, t, ph, pw//2 + 1)
+        # Convert to real space for NCC computation
+        shifted_real = torch.fft.irfftn(shifted_patches, s=(ph, pw), dim=(-2, -1))
+        reference_real = torch.fft.irfftn(reference_patches, s=(ph, pw), dim=(-2, -1))
+        # Compute normalized cross-correlation over spatial dims for each (b, t)
+        eps = 1e-8
+        x = shifted_real  # (b, t, ph, pw)
+        y = reference_real  # (b, t, ph, pw)
+        x_mean = x.mean(dim=(-2, -1), keepdim=True)
+        y_mean = y.mean(dim=(-2, -1), keepdim=True)
+        x_centered = x - x_mean
+        y_centered = y - y_mean
+        numerator = (x_centered * y_centered).sum(dim=(-2, -1))  # (b, t)
+        denom = torch.sqrt((x_centered.square().sum(dim=(-2, -1)) + eps) * (y_centered.square().sum(dim=(-2, -1)) + eps))
+        ncc = numerator / denom  # (b, t)
+        return -ncc.mean()
+    elif loss_type == "cc":
+        # Inputs are in rFFT space with shapes:
+        # shifted_patches: (b, t, ph, pw//2 + 1)
+        # reference_patches: (b, t, ph, pw//2 + 1)
+        # Convert to real space for CC computation
+        shifted_real = torch.fft.irfftn(shifted_patches, s=(ph, pw), dim=(-2, -1))
+        reference_real = torch.fft.irfftn(reference_patches, s=(ph, pw), dim=(-2, -1))
+
+        # Compute unnormalized cross-correlation over spatial dims
+        # (b, t, ph, pw) × (b, t, ph, pw) → (b, t)
+        cc = (shifted_real * reference_real).sum(dim=(-2, -1))
+
+        # Optionally: mean over batch and time; negate to make it a loss
+        return -cc.mean()
+        
 
