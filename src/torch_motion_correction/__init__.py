@@ -21,11 +21,11 @@ from torch_motion_correction.data_io import (
 from torch_motion_correction.deformation_field_utils import (
     evaluate_deformation_field,
 )
-from torch_motion_correction.estimate_global_motion import (
+from torch_motion_correction.estimate_motion_xc import (
     estimate_global_motion,
     estimate_motion_cross_correlation_patches,
 )
-from torch_motion_correction.estimate_local_motion import estimate_local_motion
+from torch_motion_correction.estimate_motion_optimizer import estimate_local_motion
 
 __all__ = [
     "estimate_local_motion",
