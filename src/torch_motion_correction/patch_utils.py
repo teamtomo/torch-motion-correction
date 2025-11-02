@@ -1,5 +1,7 @@
+"""Utilities for extracting image patches around control points."""
+
 import random
-from typing import Iterator
+from collections.abc import Iterator
 
 import torch
 
@@ -27,7 +29,9 @@ class ImagePatchIterator:
 
     Methods
     -------
-    get_iterator(batch_size: int, randomized: bool = True) -> Iterator[tuple[torch.Tensor, torch.Tensor]]
+    get_iterator(
+        batch_size: int, randomized: bool = True
+    ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]
         Data-loader style iterator yielding batches of image patches and corresponding
         normalized control points for each batch.
     """
@@ -46,7 +50,8 @@ class ImagePatchIterator:
         patch_size: tuple[int, int],
         control_points: torch.Tensor,
     ) -> None:
-        """Initialization from image shape, patch size, and control points.
+        """
+        Initialization from image shape, patch size, and control points.
 
         NOTE: Control points are expected to be in (t, gh, gw, 3) format, and only
         constant control points over time are currently supported.
@@ -55,7 +60,16 @@ class ImagePatchIterator:
         ----------
         image : torch.Tensor
             The input image to be patched (t, H, W).
+        patch_size : tuple[int, int]
+            Size of the patches to extract (ph, pw) in terms of pixels.
+        control_points : torch.Tensor
+            Control points in pixel coordinates with shape (t, gh, gw, 3) where
+            gh and gw are the number of control points in height and width dimensions,
+            and 3 corresponds to (time, y, x) coordinates.
 
+        Returns
+        -------
+        None
         """
         assert len(image.shape) == 3, "Image must be 3D (t, H, W)"
         assert len(patch_size) == 2, "Patch size must be 2D (ph, pw)"
@@ -130,14 +144,16 @@ class ImagePatchIterator:
             normalized_control_points is a tensor of shape (batch_size, t, 3).
         """
 
-        def inner_iterator():
+        def inner_iterator() -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
             """Helper function implementing the iterator logic."""
             t, gh, gw, _ = self.control_points.shape
             ph, pw = self.patch_size
 
             # NOTE: This is currently assuming control points are constant over time
             _control_points = self.control_points[0].reshape(-1, 3)  # (gh * gw, 3)
-            # _control_points_norm = self.control_points_normalized[0].reshape(-1, 3)  # (t, gh * gw, 3)
+            # _control_points_norm = self.control_points_normalized[0].reshape(
+            #     -1, 3
+            # )  # (t, gh * gw, 3)
             _control_points_norm = self.control_points_normalized.reshape(
                 t, -1, 3
             )  # (t, gh * gw, 3)
@@ -150,10 +166,10 @@ class ImagePatchIterator:
                 _control_points_norm = _control_points_norm[:, indices]
 
             for i in range(0, gh * gw, batch_size):
-                batch_control_points = _control_points[i: i + batch_size]  # (b, 3)
+                batch_control_points = _control_points[i : i + batch_size]  # (b, 3)
                 batch_control_points_norm = _control_points_norm[
-                                            :, i: i + batch_size
-                                            ]  # (b, t, 3)
+                    :, i : i + batch_size
+                ]  # (b, t, 3)
 
                 # Use actual control points to extract patches from the image
                 patches = []

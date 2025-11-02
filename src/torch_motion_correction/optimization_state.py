@@ -1,3 +1,5 @@
+"""Tracking and storing motion correction optimization state."""
+
 import torch
 
 
@@ -30,6 +32,14 @@ class OptimizationState:
         self.step = step
 
     def as_dict(self) -> dict:
+        """
+        Returns a dictionary representation of the optimization checkpoint.
+
+        Returns
+        -------
+        dict
+            A dictionary representation of the optimization checkpoint.
+        """
         return {
             "deformation_field": self.deformation_field.tolist(),
             "loss": self.loss,
@@ -71,25 +81,63 @@ class OptimizationTracker:
         self.total_steps = total_steps
 
     def sample_this_step(self, step: int) -> bool:
+        """
+        Determines if a checkpoint should be sampled at the given step.
+
+        Parameters
+        ----------
+        step: int
+            The optimization step number.
+
+        Returns
+        -------
+        bool
+            True if a checkpoint should be sampled at the given step, False otherwise.
+        """
         return step % self.sample_every_n_steps == 0 or step == self.total_steps - 1
 
     def add_checkpoint(
         self, deformation_field: torch.Tensor, loss: float, step: int
     ) -> None:
-        self.checkpoints.append(
-            OptimizationState(deformation_field, loss, step)
-        )
+        """
+        Adds a new optimization checkpoint.
+
+        Parameters
+        ----------
+        deformation_field: torch.Tensor
+            The deformation field at this checkpoint with shape (2, nt, nh, nw) where
+            2 corresponds to (y, x) shifts.
+        loss: float
+            The loss value at this checkpoint.
+        step: int
+            The optimization step number at this checkpoint.
+        """
+        self.checkpoints.append(OptimizationState(deformation_field, loss, step))
 
     def as_dict(self) -> dict:
+        """
+        Returns a dictionary representation of the optimization trajectory.
+
+        Returns
+        -------
+        dict
+            A dictionary representation of the optimization trajectory.
+        """
         return {
-            "optimization_checkpoints": [
-                cp.as_dict() for cp in self.checkpoints
-            ],
+            "optimization_checkpoints": [cp.as_dict() for cp in self.checkpoints],
             "sample_every_n_steps": self.sample_every_n_steps,
             "total_steps": self.total_steps,
         }
 
     def to_json(self, filepath: str) -> None:
+        """
+        Saves the optimization trajectory to a JSON file.
+
+        Parameters
+        ----------
+        filepath: str
+            The path to the JSON file to save the optimization trajectory to.
+        """
         import json
 
         with open(filepath, "w") as f:
