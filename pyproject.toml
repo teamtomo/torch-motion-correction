@@ -39,6 +39,7 @@ dependencies = [
     "torch",
     "numpy",
     "einops",
+    "tqdm",
     "torch-image-interpolation",
     "torch-fourier-shift",
     "torch-grid-utils",
