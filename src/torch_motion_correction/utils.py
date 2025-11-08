@@ -1,8 +1,9 @@
-from pathlib import Path
-from typing import Sequence
-from torch_fourier_filter.bandpass import bandpass_filter
+"""Utilities for motion correction."""
+
+from collections.abc import Sequence
 
 import torch
+from torch_fourier_filter.bandpass import bandpass_filter
 
 
 def array_to_grid_sample(
@@ -23,8 +24,8 @@ def array_to_grid_sample(
         shape of the array being sampled at `array_coordinates`.
     """
     dtype, device = array_coordinates.dtype, array_coordinates.device
-    array_shape = torch.as_tensor(array_shape, dtype=dtype, device=device)
-    grid_sample_coordinates = (array_coordinates / (0.5 * array_shape - 0.5)) - 1
+    array_shape_tensor = torch.as_tensor(array_shape, dtype=dtype, device=device)
+    grid_sample_coordinates = (array_coordinates / (0.5 * array_shape_tensor - 0.5)) - 1
     grid_sample_coordinates = torch.flip(grid_sample_coordinates, dims=(-1,))
     return grid_sample_coordinates
 

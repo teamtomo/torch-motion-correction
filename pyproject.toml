@@ -19,7 +19,7 @@ name = "torch-motion-correction"
 dynamic = ["version"]
 description = "Motion estimation and correction in PyTorch"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
 authors = [{ name = "Alister Burt", email = "alisterburt@gmail.com" }]
 # https://pypi.org/classifiers/
@@ -27,7 +27,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",    
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -39,6 +38,7 @@ dependencies = [
     "torch",
     "numpy",
     "einops",
+    "tqdm",
     "torch-image-interpolation",
     "torch-fourier-shift",
     "torch-grid-utils",
