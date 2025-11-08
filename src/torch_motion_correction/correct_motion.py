@@ -78,7 +78,7 @@ def correct_motion(
 
 
 def _correct_frame(
-    frame: torch.Tensor,  # (h, w)
+    frame: torch.Tensor,
     pixel_spacing: float,
     frame_deformation_grid: torch.Tensor,  # (yx, h, w)
 ) -> torch.Tensor:
@@ -108,6 +108,56 @@ def _correct_frame(
         device=frame.device,
     )  # (h, w, 2) yx coords
 
+    pixel_shifts = get_pixel_shifts(
+        frame=frame,
+        pixel_spacing=pixel_spacing,
+        frame_deformation_grid=frame_deformation_grid,
+        pixel_grid=pixel_grid,
+    )  # (h, w, yx)
+
+    # todo: make sure semantics around deformation field interpolants
+    # (i.e. spatiotemporally resolved shifts) are crystal clear
+    deformed_pixel_coords = pixel_grid + pixel_shifts
+
+    # sample original image data
+    corrected_frame = sample_image_2d(
+        image=frame,
+        coordinates=deformed_pixel_coords,
+        interpolation="bicubic",
+    )
+
+    return corrected_frame
+
+
+def get_pixel_shifts(
+    frame: torch.Tensor,
+    pixel_spacing: float,
+    frame_deformation_grid: torch.Tensor,
+    pixel_grid: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Get pixel shifts from a deformation grid.
+
+    Parameters
+    ----------
+    frame: torch.Tensor
+        (h, w) frame to correct
+    pixel_spacing: float
+        Pixel spacing in Angstroms
+    frame_deformation_grid: torch.Tensor
+        (yx, h, w) deformation grid
+    pixel_grid: torch.Tensor
+        (h, w, 2) pixel grid
+
+    Returns
+    -------
+    pixel_shifts: torch.Tensor
+        (h, w, yx) pixel shifts
+    """
+    # grab frame and deformation grid dimensions
+    h, w = frame.shape
+    _, gh, gw = frame_deformation_grid.shape
+
     # interpolate oversampled per frame deformation grid at each pixel position
     image_dim_lengths = torch.as_tensor(
         [h - 1, w - 1], device=frame.device, dtype=torch.float32
@@ -132,18 +182,7 @@ def _correct_frame(
     # find pixel positions to sample image data at, accounting for deformations
     pixel_shifts = einops.rearrange(pixel_shifts, "1 yx h w -> h w yx")
 
-    # todo: make sure semantics around deformation field interpolants
-    # (i.e. spatiotemporally resolved shifts) are crystal clear
-    deformed_pixel_coords = pixel_grid + pixel_shifts
-
-    # sample original image data
-    corrected_frame = sample_image_2d(
-        image=frame,
-        coordinates=deformed_pixel_coords,
-        interpolation="bicubic",
-    )
-
-    return corrected_frame
+    return pixel_shifts
 
 
 def correct_motion_slow(
