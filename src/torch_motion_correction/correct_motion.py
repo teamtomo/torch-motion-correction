@@ -3,6 +3,7 @@
 import einops
 import torch
 import torch.nn.functional as F
+from torch_cubic_spline_grids import CubicBSplineGrid3d, CubicCatmullRomGrid3d
 from torch_fourier_shift import fourier_shift_dft_2d
 from torch_grid_utils import coordinate_grid
 from torch_image_interpolation import sample_image_2d
@@ -52,7 +53,7 @@ def correct_motion(
         deformation_grid = deformation_grid.to(device)
 
     t, _, _ = image.shape
-    _, gt, gh, gw = deformation_grid.shape
+    _, _, gh, gw = deformation_grid.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
 
     # Use conditional gradient context to save memory
@@ -100,7 +101,6 @@ def _correct_frame(
     """
     # grab frame and deformation grid dimensions
     h, w = frame.shape
-    _, gh, gw = frame_deformation_grid.shape
 
     # prepare a grid of pixel positions
     pixel_grid = coordinate_grid(
@@ -183,6 +183,138 @@ def get_pixel_shifts(
     pixel_shifts = einops.rearrange(pixel_shifts, "1 yx h w -> h w yx")
 
     return pixel_shifts
+
+
+def correct_motion_two_grids(
+    image: torch.Tensor,  # (t, h, w)
+    new_deformation_grid: CubicCatmullRomGrid3d
+    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d - optimizable with gradients
+    base_deformation_grid: CubicCatmullRomGrid3d
+    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d - frozen base grid
+    pixel_spacing: float,
+    grad: bool = True,
+    device: torch.device = None,
+) -> torch.Tensor:
+    """Correct movie motion using two deformation grids.
+
+    Parameters
+    ----------
+    image: torch.Tensor
+        (t, h, w) array of images to motion correct
+    new_deformation_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d
+        Optimizable deformation grid with gradients
+    base_deformation_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d
+        Frozen base deformation grid
+    pixel_spacing: float
+        Pixel spacing in Angstroms
+    grad: bool
+        Whether to enable gradients. Default is True.
+    device: torch.device, optional
+        Device for computation. Default is None, which uses the device of the
+        input image.
+
+    Returns
+    -------
+    corrected_frames: torch.Tensor
+        (t, h, w) corrected images
+    """
+    if device is None:
+        device = image.device
+    else:
+        image = image.to(device)
+
+    t, _, _ = image.shape
+
+    # Get grid resolution from new_deformation_grid
+    _, _, gh, gw = new_deformation_grid.data.shape
+
+    normalized_t = torch.linspace(0, 1, steps=t, device=device)
+
+    # Use conditional gradient context
+    gradient_context = torch.enable_grad() if grad else torch.no_grad()
+
+    with gradient_context:
+        # Correct motion in each frame by evaluating both grids
+        corrected_frames = []
+
+        for _, (frame, frame_t) in enumerate(zip(image, normalized_t)):
+            corrected_frame = _correct_frame_two_grids(
+                frame=frame,
+                new_grid=new_deformation_grid,
+                base_grid=base_deformation_grid,
+                frame_t=frame_t,
+                grid_shape=(10 * gh, 10 * gw),
+                pixel_spacing=pixel_spacing,
+            )
+            corrected_frames.append(corrected_frame)
+
+    corrected_frames = torch.stack(corrected_frames, dim=0)
+
+    return corrected_frames  # (t, h, w)
+
+
+def _correct_frame_two_grids(
+    frame: torch.Tensor,
+    new_grid: CubicCatmullRomGrid3d
+    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d with gradients
+    base_grid: CubicCatmullRomGrid3d
+    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d frozen
+    frame_t: float,
+    grid_shape: tuple[int, int],
+    pixel_spacing: float,
+) -> torch.Tensor:
+    """Correct a single frame using two deformation grids.
+
+    Parameters
+    ----------
+    frame: torch.Tensor
+        (h, w) frame to correct
+    new_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d
+        Optimizable deformation grid with gradients
+    base_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d
+        Frozen base deformation grid
+    frame_t: float
+        Timepoint to evaluate at [0, 1]
+    grid_shape: tuple[int, int]
+        (h, w) shape of the grid to evaluate at
+    pixel_spacing: float
+        Pixel spacing in Angstroms
+
+    Returns
+    -------
+    corrected_frame: torch.Tensor
+        (h, w) corrected frame
+    """
+    h, w = grid_shape
+
+    # Create normalized coordinate grid for this timepoint
+    y = torch.linspace(0, 1, steps=h, device=frame.device)
+    x = torch.linspace(0, 1, steps=w, device=frame.device)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    yx_grid = einops.rearrange([yy, xx], "yx h w -> (h w) yx")
+    tyx_grid = F.pad(yx_grid, (1, 0), value=frame_t)  # (h*w, 3)
+
+    # Evaluate both grids at these coordinates
+    # new_grid is called directly (preserves gradients!)
+    new_shifts = new_grid(tyx_grid)  # (h*w, 2) with gradients
+
+    # base_grid is also called directly but we detach (no gradients needed)
+    base_shifts = base_grid(tyx_grid).detach()  # (h*w, 2) no gradients
+
+    # Combine shifts (addition preserves gradients from new_shifts)
+    combined_shifts = new_shifts + base_shifts  # (h*w, 2)
+
+    # Reshape back to spatial grid
+    combined_shifts = einops.rearrange(combined_shifts, "(h w) yx -> yx h w", h=h, w=w)
+
+    # Now apply the combined shifts to the frame
+    corrected_frame = _correct_frame(
+        frame=frame,
+        frame_deformation_grid=combined_shifts,
+        pixel_spacing=pixel_spacing,
+    )
+
+    return corrected_frame
 
 
 def correct_motion_slow(
