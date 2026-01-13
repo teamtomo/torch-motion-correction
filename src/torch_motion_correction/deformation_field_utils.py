@@ -40,7 +40,7 @@ def evaluate_deformation_field(
 
 
 def evaluate_deformation_field_at_t(
-    deformation_field: torch.Tensor,  # (yx, nt, nh, nw)
+    deformation_field: torch.Tensor | CubicCatmullRomGrid3d | CubicBSplineGrid3d,
     t: float,  # [0, 1]
     grid_shape: tuple[int, int],  # (h, w)
     grid_type: str = "catmull_rom",
@@ -49,7 +49,7 @@ def evaluate_deformation_field_at_t(
 
     Parameters
     ----------
-    deformation_field: torch.Tensor
+    deformation_field: torch.Tensor | CubicCatmullRomGrid3d | CubicBSplineGrid3d
         (yx, nt, nh, nw) deformation field data
     t: float
         Timepoint to evaluate at [0, 1]
@@ -63,9 +63,15 @@ def evaluate_deformation_field_at_t(
     shifts: torch.Tensor
         (tyx, h, w) predicted shifts
     """
+    if isinstance(deformation_field, CubicCatmullRomGrid3d) or isinstance(
+        deformation_field, CubicBSplineGrid3d
+    ):
+        device = deformation_field.data.device
+    else:
+        device = deformation_field.device
     h, w = grid_shape
-    y = torch.linspace(0, 1, steps=h, device=deformation_field.device)
-    x = torch.linspace(0, 1, steps=w, device=deformation_field.device)
+    y = torch.linspace(0, 1, steps=h, device=device)
+    x = torch.linspace(0, 1, steps=w, device=device)
 
     # Create meshgrid and flatten to get (h*w, 2) array of yx coordinates
     yy, xx = torch.meshgrid(y, x, indexing="ij")
@@ -75,9 +81,14 @@ def evaluate_deformation_field_at_t(
     tyx_grid = F.pad(yx_grid, (1, 0), value=t)  # (h*w, 3)
 
     # Evaluate deformation grid and return as (tyx, h, w)
-    shifts = evaluate_deformation_field(
-        deformation_field, tyx=tyx_grid, grid_type=grid_type
-    )  # (h*w, c)
+    if isinstance(deformation_field, CubicCatmullRomGrid3d) or isinstance(
+        deformation_field, CubicBSplineGrid3d
+    ):
+        shifts = deformation_field(tyx_grid)
+    else:
+        shifts = evaluate_deformation_field(
+            deformation_field, tyx=tyx_grid, grid_type=grid_type
+        )  # (h*w, c)
     shifts = einops.rearrange(shifts, "(h w) tyx -> tyx h w", h=h, w=w)
     return shifts
 

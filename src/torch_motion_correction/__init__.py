@@ -13,6 +13,7 @@ from torch_motion_correction.correct_motion import (
     correct_motion,
     correct_motion_fast,
     correct_motion_slow,
+    correct_motion_two_grids,
     get_pixel_shifts,
 )
 from torch_motion_correction.data_io import (
@@ -31,6 +32,7 @@ from torch_motion_correction.estimate_motion_xc import (
 __all__ = [
     "estimate_local_motion",
     "correct_motion",
+    "correct_motion_two_grids",
     "correct_motion_fast",
     "correct_motion_slow",
     "get_pixel_shifts",
